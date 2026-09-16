@@ -6014,6 +6014,38 @@ static void config_validate_glm_dsa_model(const ds4_model *m) {
     g_ds4_shape = DS4_SHAPE_GLM52;
     memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
 
+    /* Expert-pruned derivatives of GLM 5.2/5.3 (for example GLM-5.3-SLIM-E192:
+     * 192 routed experts, no MTP block) keep the exact same per-layer graph, so
+     * the routed expert count, the block count and the MTP block count are
+     * taken from the GGUF instead of being pinned to the official shape.  Every
+     * other dimension is still required to match. */
+    {
+        const uint32_t n_expert_gguf = required_u32(m, "glm-dsa.expert_count");
+        const uint32_t n_layer_gguf = required_u32(m, "glm-dsa.block_count");
+        const uint32_t n_nextn_gguf = required_u32(m, "glm-dsa.nextn_predict_layers");
+        if (n_nextn_gguf > 1) {
+            ds4_die("glm-dsa.nextn_predict_layers must be 0 or 1");
+        }
+        if (n_layer_gguf > DS4_MAX_LAYER ||
+            n_layer_gguf <= n_nextn_gguf + DS4_SHAPE_GLM52.n_leading_dense) {
+            ds4_die("glm-dsa.block_count is out of range for this build");
+        }
+        if (n_expert_gguf > DS4_MAX_EXPERT ||
+            n_expert_gguf < DS4_SHAPE_GLM52.n_expert_used) {
+            ds4_die("glm-dsa.expert_count is out of range for this build");
+        }
+        g_ds4_shape.n_expert = n_expert_gguf;
+        g_ds4_shape.n_layer = n_layer_gguf;
+        g_ds4_shape.n_nextn_predict = n_nextn_gguf;
+        if (n_expert_gguf != DS4_SHAPE_GLM52.n_expert ||
+            n_layer_gguf != DS4_SHAPE_GLM52.n_layer ||
+            n_nextn_gguf != DS4_SHAPE_GLM52.n_nextn_predict) {
+            fprintf(stderr,
+                    "ds4: GLM DSA variant: %u routed experts, %u blocks, %u MTP block(s)\n",
+                    n_expert_gguf, n_layer_gguf, n_nextn_gguf);
+        }
+    }
+
     const uint32_t n_layer = required_u32(m, "glm-dsa.block_count");
     const uint64_t n_ctx = required_u64_compat(m, "glm-dsa.context_length");
     const uint32_t n_embd = required_u32(m, "glm-dsa.embedding_length");
@@ -21611,10 +21643,15 @@ static bool metal_graph_streaming_expert_hotlist_load_default(
     } else if (g_ds4_shape.variant == DS4_VARIANT_FLASH) {
         hotlist = ds4_default_streaming_hotlist_flash;
         hotlist_count = ds4_default_streaming_hotlist_flash_count;
-    } else if (g_ds4_shape.variant == DS4_VARIANT_GLM52) {
+    } else if (g_ds4_shape.variant == DS4_VARIANT_GLM52 &&
+               DS4_N_EXPERT == DS4_SHAPE_GLM52.n_expert &&
+               DS4_N_LAYER == DS4_SHAPE_GLM52.n_layer) {
         hotlist = ds4_default_streaming_hotlist_glm52;
         hotlist_count = ds4_default_streaming_hotlist_glm52_count;
     } else {
+        /* Expert-pruned GLM variants (GLM-5.3-SLIM-E192) renumber the routed
+         * experts, so the GLM 5.2 hot seed does not describe them: start
+         * cold and let the cache demand-fill. */
         *loaded_out = 0;
         return true;
     }
