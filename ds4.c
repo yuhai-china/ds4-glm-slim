@@ -41689,6 +41689,19 @@ static bool glm_graph_memory_guard_budget(
             default_reserve_gib = rocm_reserve_gib;
         }
     }
+#elif !defined(__APPLE__)
+    if (!ssd_streaming && !ds4_gpu_device_is_spark()) {
+        /* Discrete CUDA: the base is device memory reported by the driver
+         * and no operating system lives in it.  Reserve a slice for the
+         * CUDA context, cuBLAS workspaces and allocator slack instead of the
+         * unified-memory 32 GiB (a 150 GiB GLM would otherwise be refused on
+         * a 180 GiB card). */
+        double cuda_reserve_gib = glm_graph_bytes_to_gib(budget_base) / 16.0;
+        if (cuda_reserve_gib < 6.0) cuda_reserve_gib = 6.0;
+        if (cuda_reserve_gib < default_reserve_gib) {
+            default_reserve_gib = cuda_reserve_gib;
+        }
+    }
 #endif
     const double reserve_gib =
         glm_graph_env_double("DS4_GLM_MEMORY_GUARD_RESERVE_GB",
