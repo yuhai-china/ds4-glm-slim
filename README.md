@@ -2,6 +2,13 @@
   <img src="logo.svg" alt="DwarfStar logo" width="220">
 </p>
 
+> **Fork: GLM 5.3 SLIM support.** This repository is a fork of
+> [antirez/ds4](https://github.com/antirez/ds4) that adds support for
+> expert-pruned full GLM 5.3 checkpoints such as GLM-5.3-SLIM-E192 (192 of 256
+> routed experts, no MTP block, 149.7 GiB as IQ2_XXS). See
+> [docs/GLM53_SLIM.md](docs/GLM53_SLIM.md). Everything else is unchanged upstream
+> DwarfStar; it is not intended to be merged back.
+
 **DwarfStar** aims to be the best way to run a few excellent large
 language models on consumer hardware (that is, hardware that people
 can actually own). To reach this goal, we are building
@@ -221,6 +228,7 @@ DGX Spark results, comparison conditions, and benchmark commands.
 ## Detailed Guides
 
 - [Models and vision](docs/MODELS.md): Flash, PRO, GLM, and matching encoders.
+- [GLM 5.3 SLIM](docs/GLM53_SLIM.md): quantize and run expert-pruned full GLM 5.3 (this fork).
 - [SSD streaming](docs/SSD_STREAMING.md): run larger than RAM and size the cache.
 - [Inference across machines](docs/DISTRIBUTED.md): two-Mac TP/RDMA and layer pipelines.
 - [Speculative decoding](docs/SPECULATIVE_DECODING.md): DSpark, GLM MTP, and sampling.
