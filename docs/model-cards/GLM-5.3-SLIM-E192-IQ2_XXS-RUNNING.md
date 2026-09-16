@@ -358,7 +358,9 @@ pipeline:
 
 * `gguf-tools/glm53_full_quantize.py --hf <FP8 checkpoint> --tokenizer-template
   <GLM GGUF> --cuda` reproduces this file (about 30 minutes on one B200; the
-  CPU path takes hours).
+  CPU path takes hours). Any GLM 5.x DwarfStar GGUF works as tokenizer
+  template — this file itself, or a 9 MiB tokenizer-only GGUF made with
+  `gguf-tools/gguf_tokenizer_only.py`.
 * `--dry-run` prints the exact size and validates the checkpoint and tokenizer
   without writing anything.
 * An imatrix pass: run this GGUF through `ds4 --imatrix-dataset

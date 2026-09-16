@@ -167,6 +167,20 @@ This reads only the payloads needed for that tensor.  Add `--compare-gguf
 DeepSeek-V4-Flash-DSpark-support-0731.gguf` to byte-compare against an existing
 support GGUF.
 
+## Tokenizer-Only Template
+
+`glm53_quantize.py` and `glm53_full_quantize.py` read only the `tokenizer.*`
+records of `--tokenizer-template`.  `gguf_tokenizer_only.py` copies those
+records into a tensor-less GGUF (about 9 MiB for GLM's 154,880-token
+vocabulary) so the multi-hundred-GiB model file does not have to stay on disk:
+
+```sh
+python3 gguf-tools/gguf_tokenizer_only.py MODEL.gguf GLM-5.3-tokenizer.gguf --verify
+```
+
+`--verify` re-reads the output with the quantizer's loader and checks that the
+records and token list match the source byte for byte.
+
 ## IQ2_XXS On A CUDA GPU
 
 `iq2xxs_cuda.py` is a PyTorch port of the IQ2_XXS quantizer in `quants.c`

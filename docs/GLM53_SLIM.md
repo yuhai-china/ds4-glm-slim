@@ -41,14 +41,24 @@ the SLIM GGUF like any other GLM GGUF.  Startup prints
 ## Quantize
 
 The source is the FP8 (block 128) Hugging Face snapshot.  A GLM GGUF with the
-same tokenizer is needed as tokenizer template; the published full GLM 5.3 Q2
-file works and only its metadata is read.
+same tokenizer is needed as tokenizer template; only its `tokenizer.*`
+metadata is read, so any GLM 5.x DwarfStar GGUF works, including a previous
+SLIM build.  To avoid keeping a 197 GiB file around for that, extract the
+tokenizer once into a 9 MiB tensor-less GGUF:
+
+```sh
+python3 gguf-tools/gguf_tokenizer_only.py gguf/GLM-5.3-UD-IQ2_XXS_RoutedIQ2XXS_blk78Q2K.gguf \
+  gguf/GLM-5.3-tokenizer.gguf --name "GLM-5.3 tokenizer" --verify
+```
+
+and pass `--tokenizer-template gguf/GLM-5.3-tokenizer.gguf` below (the plan
+and output are byte-identical).
 
 ```sh
 make -C gguf-tools
 python3 gguf-tools/glm53_full_quantize.py \
   --hf /path/to/GLM-5.3-SLIM-E192 \
-  --tokenizer-template gguf/GLM-5.3-UD-IQ2_XXS_RoutedIQ2XXS_blk78Q2K.gguf \
+  --tokenizer-template gguf/GLM-5.3-tokenizer.gguf \
   --model-name GLM-5.3-SLIM-E192 \
   --repo-url https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192 \
   --cuda --cuda-batch 32 \
@@ -163,6 +173,8 @@ GGUF; they are the user-facing counterpart of this page.
   `config.json`; the index validator takes that spec.
 * `gguf-tools/iq2xxs_cuda.py`: IQ2_XXS routed-expert quantization on CUDA,
   byte-identical to `quants.c`; `--cuda` in both GLM quantizers.
+* `gguf-tools/gguf_tokenizer_only.py`: tokenizer-only GGUF extraction, so a
+  9 MiB file can serve as `--tokenizer-template`.
 * `gguf-tools/glm53_full_quantize.py`: no hardcoded 256/79/78; GGUF metadata
   (`glm-dsa.expert_count`, `glm-dsa.block_count`,
   `glm-dsa.nextn_predict_layers`) follows the checkpoint; `--model-name` and
