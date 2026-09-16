@@ -240,7 +240,55 @@ def validate_glm53_index(weight_map):
         fail(f"missing required tensors: {missing}")
 
 
-def validate_glm53_full_index(weight_map):
+def glm53_full_spec(config=None):
+    """Describe the full GLM-5.3 checkpoint layout.
+
+    The official zai-org/GLM-5.3 snapshot has 78 trunk layers, one MTP block
+    (layer 78) and 256 routed experts.  Expert-pruned derivatives such as
+    GLM-5.3-SLIM-E192 keep the same layout with fewer routed experts and may
+    ship without the MTP block, so the layout is derived from config.json when
+    one is given.
+    """
+    if config is None:
+        trunk = 78
+        nextn = 1
+        n_expert = 256
+        n_dense = 3
+        # full indexers at layers 0, 1, 2 and then every fourth layer 6..74
+        indexer_types = ["full"] * 3 + ["shared", "shared", "shared", "full"] * 18 + ["shared"] * 3
+    else:
+        trunk = int(config["num_hidden_layers"])
+        nextn = int(config.get("num_nextn_predict_layers", 0))
+        n_expert = int(config["n_routed_experts"])
+        n_dense = int(config.get("first_k_dense_replace", 3))
+        indexer_types = list(config["indexer_types"])
+    if len(indexer_types) != trunk:
+        fail(f"indexer_types has {len(indexer_types)} entries for {trunk} trunk layers")
+    if nextn not in (0, 1):
+        fail(f"unsupported num_nextn_predict_layers: {nextn}")
+    owners = {layer for layer, kind in enumerate(indexer_types) if kind == "full"}
+    if nextn:
+        owners.add(trunk)
+    return {
+        "trunk_layers": trunk,
+        "block_count": trunk + nextn,
+        "nextn_predict_layers": nextn,
+        "mtp_block": trunk if nextn else None,
+        "expert_count": n_expert,
+        "leading_dense": n_dense,
+        "indexer_types": indexer_types,
+        "indexer_owner_layers": owners,
+    }
+
+
+def validate_glm53_full_index(weight_map, spec=None):
+    if spec is None:
+        spec = glm53_full_spec()
+    block_count = spec["block_count"]
+    n_expert = spec["expert_count"]
+    n_dense = spec["leading_dense"]
+    mtp_block = spec["mtp_block"]
+
     names = set(weight_map)
     layers = set()
     indexer_layers = set()
@@ -269,13 +317,12 @@ def validate_glm53_full_index(weight_map):
             expert_ids.setdefault(layer, set()).add(expert_id)
             expert_parts.setdefault((layer, expert_id), set()).add(expert.group(2))
 
-    expect_equal(layers, set(range(79)), "full GLM-5.3 layer set")
-    expect_equal(sparse_layers, set(range(3, 79)), "full GLM-5.3 sparse FFN layer set")
-    expected_indexers = {0, 1, 2, 78} | set(range(6, 78, 4))
-    expect_equal(indexer_layers, expected_indexers, "full GLM-5.3 indexer owner layers")
-    for layer in range(3, 79):
-        expect_equal(expert_ids.get(layer), set(range(256)), f"layer {layer} expert ids")
-        for expert in range(256):
+    expect_equal(layers, set(range(block_count)), "full GLM-5.3 layer set")
+    expect_equal(sparse_layers, set(range(n_dense, block_count)), "full GLM-5.3 sparse FFN layer set")
+    expect_equal(indexer_layers, spec["indexer_owner_layers"], "full GLM-5.3 indexer owner layers")
+    for layer in range(n_dense, block_count):
+        expect_equal(expert_ids.get(layer), set(range(n_expert)), f"layer {layer} expert ids")
+        for expert in range(n_expert):
             expect_equal(
                 expert_parts.get((layer, expert)),
                 {"gate", "up", "down"},
@@ -286,11 +333,14 @@ def validate_glm53_full_index(weight_map):
         "model.embed_tokens.weight",
         "model.norm.weight",
         "lm_head.weight",
-        "model.layers.78.eh_proj.weight",
-        "model.layers.78.enorm.weight",
-        "model.layers.78.hnorm.weight",
-        "model.layers.78.shared_head.norm.weight",
     }
+    if mtp_block is not None:
+        required |= {
+            f"model.layers.{mtp_block}.eh_proj.weight",
+            f"model.layers.{mtp_block}.enorm.weight",
+            f"model.layers.{mtp_block}.hnorm.weight",
+            f"model.layers.{mtp_block}.shared_head.norm.weight",
+        }
     missing = sorted(required - names)
     if missing:
         fail(f"missing required full GLM-5.3 tensors: {missing}")

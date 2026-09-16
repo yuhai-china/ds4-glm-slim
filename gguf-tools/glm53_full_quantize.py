@@ -8,13 +8,30 @@ import json
 import os
 import sys
 
+import functools
+
 import glm53_quantize as q
-from glm53_manifest import validate_glm53_full_index
+from glm53_manifest import glm53_full_spec, validate_glm53_full_index
 
 
+# Checkpoint layout (block count, MTP block, routed expert count).  Filled in
+# from config.json by main() so that expert-pruned derivatives of GLM-5.3 such
+# as GLM-5.3-SLIM-E192 (192 routed experts, no MTP block) can be converted too.
 EXPERT_COUNT = 256
 BLOCK_COUNT = 79
 MTP_BLOCK = 78
+SPEC = glm53_full_spec()
+
+
+def configure_layout(config):
+    global EXPERT_COUNT, BLOCK_COUNT, MTP_BLOCK, SPEC
+    SPEC = glm53_full_spec(config)
+    EXPERT_COUNT = SPEC["expert_count"]
+    BLOCK_COUNT = SPEC["block_count"]
+    MTP_BLOCK = SPEC["mtp_block"]
+    if SPEC["leading_dense"] != 3:
+        q.fail(f"unsupported first_k_dense_replace: {SPEC['leading_dense']}")
+    return SPEC
 
 
 def source_prefix(layer):
@@ -162,8 +179,8 @@ def build_plan(db, config, provisional_q2k=False):
     plan = []
     q.add_regular(plan, db, "token_embd.weight", "model.embed_tokens.weight", q.QTYPE_Q8_0, "embedding")
     indexer_types = config["indexer_types"]
-    if len(indexer_types) != MTP_BLOCK:
-        q.fail(f"expected {MTP_BLOCK} indexer types, got {len(indexer_types)}")
+    if len(indexer_types) != SPEC["trunk_layers"]:
+        q.fail(f"expected {SPEC['trunk_layers']} indexer types, got {len(indexer_types)}")
 
     for layer in range(BLOCK_COUNT):
         prefix = source_prefix(layer)
@@ -212,8 +229,12 @@ def build_plan(db, config, provisional_q2k=False):
     q.add_regular(plan, db, "output.weight", "lm_head.weight", q.QTYPE_Q8_0, "output")
 
     names = [item.name for item in plan]
-    if len(names) != 1809:
-        q.fail(f"full GLM-5.3 plan has {len(names)} tensors, expected 1809")
+    # 3 dense layers x 18 tensors, MoE layers x 23 tensors, 4 MTP-only tensors
+    # (eh_proj, enorm, hnorm, shared_head_norm), embedding + output norm +
+    # output.  1809 for the official checkpoint, 1782 without the MTP block.
+    expected = 3 * 18 + (BLOCK_COUNT - 3) * 23 + (4 if MTP_BLOCK is not None else 0) + 3
+    if len(names) != expected:
+        q.fail(f"full GLM-5.3 plan has {len(names)} tensors, expected {expected}")
     if len(names) != len(set(names)):
         q.fail("duplicate GGUF tensor names in full GLM-5.3 plan")
     offset = 0
@@ -223,21 +244,23 @@ def build_plan(db, config, provisional_q2k=False):
     return plan
 
 
-def model_metadata(hf_dir, source_revision):
+def model_metadata(hf_dir, source_revision, model_name="GLM-5.3", repo_url=None):
     with open(os.path.join(hf_dir, "chat_template.jinja"), "rb") as fp:
         chat_template = fp.read()
+    if repo_url is None:
+        repo_url = "https://huggingface.co/zai-org/GLM-5.3"
     return [
         q.kv_string("general.architecture", "glm-dsa"),
-        q.kv_string("general.name", "GLM-5.3"),
-        q.kv_string("general.basename", "GLM-5.3"),
+        q.kv_string("general.name", model_name),
+        q.kv_string("general.basename", model_name),
         q.kv_string("general.version", "5.3"),
         q.kv_string("general.license", "glm-5.3"),
-        q.kv_string("general.source.repo_url", "https://huggingface.co/zai-org/GLM-5.3"),
+        q.kv_string("general.source.repo_url", repo_url),
         q.kv_string("general.source.revision", source_revision),
         q.kv_u32("general.alignment", q.GGUF_ALIGNMENT),
         q.kv_u32("general.quantization_version", 2),
         q.kv_u32("glm-dsa.block_count", BLOCK_COUNT),
-        q.kv_u32("glm-dsa.nextn_predict_layers", 1),
+        q.kv_u32("glm-dsa.nextn_predict_layers", SPEC["nextn_predict_layers"]),
         q.kv_u64("glm-dsa.context_length", 1048576),
         q.kv_u32("glm-dsa.embedding_length", 6144),
         q.kv_u32("glm-dsa.vocab_size", 154880),
@@ -283,6 +306,8 @@ def parse_args():
     )
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--source-revision", default="e0b07fd2751b42d5efa199cc02c2b271deadc516")
+    parser.add_argument("--model-name", default="GLM-5.3", help="general.name / general.basename")
+    parser.add_argument("--repo-url", help="general.source.repo_url (defaults to zai-org/GLM-5.3)")
     parser.add_argument("--quants-library", help="path to libds4quants")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -301,12 +326,18 @@ def main():
         config = json.load(fp)
     if config.get("architectures") != ["GlmMoeDsaForCausalLM"]:
         q.fail(f"unexpected architecture: {config.get('architectures')!r}")
-    db = q.SourceDB(args.hf, validate_glm53_full_index)
+    spec = configure_layout(config)
+    print(
+        f"glm53-full-quantize: layout blocks={BLOCK_COUNT} mtp_block={MTP_BLOCK} "
+        f"routed_experts={EXPERT_COUNT}",
+        file=sys.stderr,
+    )
+    db = q.SourceDB(args.hf, functools.partial(validate_glm53_full_index, spec=spec))
     try:
         plan = build_plan(db, config, args.provisional_q2k)
         tokenizer_records, template_tokens = q.load_tokenizer_records(args.tokenizer_template)
         q.validate_tokenizer_template(args.hf, template_tokens, 154880)
-        kv_records = model_metadata(args.hf, args.source_revision)
+        kv_records = model_metadata(args.hf, args.source_revision, args.model_name, args.repo_url)
         if args.dry_run:
             q.print_plan(plan, kv_records, tokenizer_records)
         else:
