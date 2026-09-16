@@ -2,10 +2,11 @@
   <img src="logo.svg" alt="DwarfStar logo" width="220">
 </p>
 
-> **Fork: GLM 5.3 SLIM support.** This repository is a fork of
-> [antirez/ds4](https://github.com/antirez/ds4) that adds support for
-> expert-pruned full GLM 5.3 checkpoints such as GLM-5.3-SLIM-E192 (192 of 256
-> routed experts, no MTP block, 149.7 GiB as IQ2_XXS). See
+> **Fork: GLM 5.3 on a single machine.** This repository is a fork of
+> [antirez/ds4](https://github.com/antirez/ds4) that runs expert-pruned full
+> GLM 5.3 checkpoints such as GLM-5.3-SLIM-E192 (192 of 256 routed experts, no
+> MTP block). Its IQ2_XXS build is 149.7 GiB and stays resident on one 180 GB
+> GPU or one Mac Studio, where the 197 GiB full model does not fit. See
 > [docs/GLM53_SLIM.md](docs/GLM53_SLIM.md) and the
 > [model card](docs/model-cards/GLM-5.3-SLIM-E192-IQ2_XXS.md) /
 > [running guide](docs/model-cards/GLM-5.3-SLIM-E192-IQ2_XXS-RUNNING.md) of the

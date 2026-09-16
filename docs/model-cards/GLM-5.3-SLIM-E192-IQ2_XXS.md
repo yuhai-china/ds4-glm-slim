@@ -19,23 +19,39 @@ tags:
 - ds4
 ---
 
-# GLM-5.3-SLIM-E192 — IQ2_XXS GGUF for DwarfStar (ds4)
+# GLM-5.3-SLIM-E192 — IQ2_XXS GGUF: GLM 5.3 on a single machine
 
-**A 149.7 GiB, 2-bit-routed-expert build of GLM-5.3-SLIM-E192 that fits one
-180 GB GPU or a 192/256 GB Mac, for the DwarfStar (`ds4`) local inference
-engine.**
+**GLM 5.3, the 744B-parameter frontier MoE, running on one GPU or one Mac.**
+Expert pruning (192 of 256 routed experts, "SLIM") took 25 % off the model;
+DwarfStar's 2-bit routed-expert recipe took the rest. The result is a
+**149.7 GiB** file that stays fully resident on a single 180 GB GPU (B200,
+21 tokens/s measured) or a single Mac Studio (256 GB; 192 GB with a small
+context), and streams from SSD on a 128 GB Mac — hardware where the unpruned
+model needs a multi-GPU node or does not fit at all.
 
-GLM-5.3-SLIM-E192 is GLM-5.3 with 192 of the 256 routed experts kept in every
-MoE layer (−25 % weights, attention/shared experts/router untouched, no MTP
-head). This file applies the same recipe DwarfStar uses for the full GLM 5.3 —
-IQ2_XXS routed experts, Q8_0 everything else — to that pruned checkpoint. The
-published full GLM 5.3 Q2 is 197 GiB; this one is **149.7 GiB**, small enough
-to stay resident on hardware where the full model needs SSD streaming.
+| GLM 5.3 form | Size | What it takes to run it |
+|---|---:|---|
+| Original FP8 (`zai-org/GLM-5.3`) | 756 GB | 8× H200/B200 or 4× B300, tensor parallel (88 GiB/GPU at TP=8: too big for 80 GB cards) |
+| Pruned FP8 (`cloudyu/GLM-5.3-SLIM-E192`) | 564 GB | 4× B200/B300 or 8× 80 GB cards |
+| Full GLM 5.3 IQ2_XXS GGUF (`antirez/glm-5.3-gguf`) | 197 GiB | 256 GB+ Mac resident; 128 GB Mac via SSD streaming; **does not fit one 180 GB GPU** |
+| **This file — SLIM IQ2_XXS GGUF** | **149.7 GiB** | **one 180 GB GPU resident (21 t/s); one Mac Studio resident (256 GB comfortably, 192 GB with a small context); 128 GB Mac via SSD streaming** |
 
-It runs with the **[`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork** of DwarfStar (a few changes
-on top of upstream `antirez/ds4`, see [Requirements](#requirements)). It is not a
-llama.cpp GGUF: the tensor layout, quant mix and metadata follow DwarfStar's
-GLM-DSA format.
+The pruning is the enabler: at 2 bits the unpruned experts alone are 187 GB,
+so no single-device quantization of the original could fit a 180 GB card with
+room for a context. Pruning removes 47 GB of expert bytes at this precision
+and, per its author's A/B on the FP8 checkpoints, costs nothing measurable on
+coding, cybersecurity, tool calling and math (GPQA −3.6 pt, C-Eval −7.3 pt).
+
+What the file is: GLM-5.3-SLIM-E192 (attention with MLA + DSA sparse indexer,
+shared experts, router, tokenizer and chat template identical to GLM 5.3; no
+MTP head) with routed experts in IQ2_XXS (2.06 bits/weight) and everything
+else in Q8_0 — the same recipe DwarfStar publishes for the full GLM 5.3, so
+per-token compute and memory traffic are unchanged; only the footprint drops.
+
+It runs with the **[`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim)
+fork** of DwarfStar (a few changes on top of upstream `antirez/ds4`, see
+[Requirements](#requirements)). It is not a llama.cpp GGUF: the tensor layout,
+quant mix and metadata follow DwarfStar's GLM-DSA format.
 
 ## At a glance
 
@@ -50,7 +66,7 @@ GLM-DSA format.
 | Routed experts | IQ2_XXS, 2.0625 bits/weight, weight-energy importance (no imatrix) |
 | Everything else | Q8_0 (attention, shared experts, dense FFN, embeddings, output head); F32 norms/routers/indexer projections |
 | Runtime | DwarfStar fork [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) (Metal, CUDA; ROCm untested) |
-| Fits | 1× 180 GB GPU (B200/GB200) resident; 256 GB+ Mac resident; 192 GB Mac resident with a small context; 128 GB Mac via SSD streaming |
+| Fits | **one** 180 GB GPU (B200/GB200) resident; **one** Mac Studio 256 GB resident, 192 GB resident with a small context; 128 GB Mac via SSD streaming |
 | Source checkpoint | [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192) (FP8), revision `e45b62eb` |
 | License | GLM-5.3 (same as the base model) |
 
