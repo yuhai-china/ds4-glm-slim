@@ -167,6 +167,35 @@ This reads only the payloads needed for that tensor.  Add `--compare-gguf
 DeepSeek-V4-Flash-DSpark-support-0731.gguf` to byte-compare against an existing
 support GGUF.
 
+## IQ2_XXS On A CUDA GPU
+
+`iq2xxs_cuda.py` is a PyTorch port of the IQ2_XXS quantizer in `quants.c`
+(grid, direct map, two-shell neighbour search, `make_qp_quants`, sign parity,
+scale refinement) that processes every 32-value block of a batch of expert
+matrices in parallel.  Sums are accumulated in the same float32 order as the
+C code, scalar/tensor divisions are true divisions, and the neighbour search
+runs as a small fused kernel compiled with `-fmad=false`, so for the same
+input and importance vector the output bytes are identical to `libds4quants`
+(`tests/test_iq2xxs_cuda.py` checks that against real expert matrices).
+
+Both GLM quantizers take `--cuda`:
+
+```sh
+python3 gguf-tools/glm53_full_quantize.py ... --cuda --cuda-batch 32
+```
+
+FP8 payloads are dequantized on the GPU as well.  On one B200 a
+2048x6144 routed expert takes about 30 ms instead of 7-16 s per CPU core,
+i.e. a full GLM-5.3-class conversion finishes in roughly half an hour.
+Requirements: PyTorch with CUDA; for the fused kernel an `nvcc` matching the
+torch CUDA major (the `nvidia/cu13` pip toolkit is picked up automatically),
+otherwise a pure PyTorch search with the same results is used.
+
+Without `--imatrix` the weight-energy fallback is summed on the GPU, whose
+summation order differs from NumPy's; a few blocks per ten thousand then
+round differently from a CPU conversion, with equal weighted error.  With an
+explicit `--imatrix` CPU and GPU conversions are byte-identical.
+
 ## When No Imatrix Is Given
 
 `iq2_xxs` requires an importance vector.  If `--imatrix` is not provided and

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import ctypes
 import dataclasses
@@ -1035,6 +1036,86 @@ def write_experts(fp, item, db, quantizer, imatrix, threads):
         )
 
 
+def cuda_expert_encoder(args):
+    """Return a CudaExpertEncoder when --cuda is requested, else None."""
+    if not getattr(args, "cuda", False):
+        return None
+    try:
+        import iq2xxs_cuda
+    except ImportError as error:
+        fail(f"--cuda needs PyTorch with CUDA: {error}")
+    if iq2xxs_cuda.torch is None or not iq2xxs_cuda.torch.cuda.is_available():
+        fail("--cuda requested but torch.cuda.is_available() is false")
+    encoder = iq2xxs_cuda.CudaExpertEncoder(getattr(args, "cuda_device", "cuda"))
+    print(
+        f"glm53-quantize: IQ2_XXS routed experts on "
+        f"{iq2xxs_cuda.torch.cuda.get_device_name(encoder.device)} "
+        f"(batch {getattr(args, 'cuda_batch', 8)})",
+        file=sys.stderr,
+    )
+    return encoder
+
+
+def write_experts_cuda(fp, item, db, quantizer, imatrix, encoder, batch):
+    """IQ2_XXS routed experts through the CUDA quantizer.
+
+    Source payloads are read ahead on a thread, dequantized (FP8 block-128 or
+    BF16) and quantized on the GPU in batches of experts; output bytes are
+    identical in layout to write_experts().
+    """
+    import torch
+
+    expert_count = item.expert_count or 288
+    width = item.shape[0]
+    per_expert = item.nbytes // expert_count
+    batch = max(1, int(batch))
+
+    def load(expert):
+        source = item.source.format(expert=expert)
+        info = db.info(source)
+        if info["dtype"] == "F8_E4M3":
+            return expert, info, db.read(source), db.read(source + "_scale_inv")
+        return expert, info, None, None
+
+    fallback_count = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        pending = collections.deque()
+        next_expert = 0
+        while next_expert < expert_count and len(pending) < 2 * batch:
+            pending.append(pool.submit(load, next_expert))
+            next_expert += 1
+        done = 0
+        while done < expert_count:
+            matrices = []
+            weights = []
+            take = min(batch, expert_count - done)
+            for _ in range(take):
+                expert, info, codes, scales = pending.popleft().result()
+                if next_expert < expert_count:
+                    pending.append(pool.submit(load, next_expert))
+                    next_expert += 1
+                if codes is not None:
+                    x = encoder.dequantize_fp8(codes, scales, info["shape"])
+                else:
+                    x = torch.from_numpy(quantizer.to_f32(db, item.source.format(expert=expert))).to(encoder.device)
+                w = imatrix.expert(item.name, expert, width, expert_count)
+                fallback_count += int(w is None)
+                matrices.append(x)
+                weights.append(w)
+            for data in encoder.encode_batch(matrices, weights):
+                if len(data) != per_expert:
+                    fail(f"{item.name}: expert generated {len(data)} bytes, expected {per_expert}")
+                fp.write(data)
+            done += take
+            del matrices
+    if imatrix.entries and fallback_count:
+        print(
+            f"glm53-quantize: {item.name} used weight-based fallback for "
+            f"{fallback_count}/{expert_count} unobserved experts",
+            file=sys.stderr,
+        )
+
+
 def file_sha256(path):
     if not path:
         return None
@@ -1092,6 +1173,7 @@ def write_gguf(args, plan, kv_records, tokenizer_records, db):
         fail(f"quantizer library not found: {library}; run make -C gguf-tools")
     quantizer = Quantizer(library)
     imatrix = Imatrix(args.imatrix, quantizer.np)
+    cuda_encoder = cuda_expert_encoder(args)
 
     data_offset, data_bytes = print_plan(plan, kv_records, tokenizer_records)
     required = data_offset + data_bytes + 32 * (1 << 30)
@@ -1152,7 +1234,9 @@ def write_gguf(args, plan, kv_records, tokenizer_records, db):
             if fp.tell() != expected_offset:
                 fail(f"output offset mismatch for {item.name}: {fp.tell()} != {expected_offset}")
             tensor_started = time.monotonic()
-            if item.is_expert:
+            if item.is_expert and cuda_encoder is not None and item.qtype == QTYPE_IQ2_XXS and not item.raw_copy:
+                write_experts_cuda(fp, item, db, quantizer, imatrix, cuda_encoder, getattr(args, "cuda_batch", 8))
+            elif item.is_expert:
                 write_experts(fp, item, db, quantizer, imatrix, args.threads)
             else:
                 write_regular(fp, item, db, quantizer)
@@ -1182,6 +1266,9 @@ def parse_args():
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--source-revision", default="84c6a6aa9497188e15a635ba793b0f95a79b1033")
     parser.add_argument("--quants-library", help="path to libds4quants")
+    parser.add_argument("--cuda", action="store_true", help="quantize IQ2_XXS routed experts on a CUDA GPU (PyTorch)")
+    parser.add_argument("--cuda-batch", type=int, default=8, help="experts per GPU call with --cuda")
+    parser.add_argument("--cuda-device", default="cuda", help="torch device for --cuda")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true", help="resume a matching per-tensor partial conversion")
     parser.add_argument("--overwrite", action="store_true")

@@ -51,9 +51,11 @@ python3 gguf-tools/glm53_full_quantize.py \
   --tokenizer-template gguf/GLM-5.3-UD-IQ2_XXS_RoutedIQ2XXS_blk78Q2K.gguf \
   --model-name GLM-5.3-SLIM-E192 \
   --repo-url https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192 \
-  --threads 24 \
+  --cuda --cuda-batch 32 \
   --out gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf
 ```
+
+Drop `--cuda` (and add `--threads N`) for a CPU-only conversion.
 
 Use `--dry-run` first: it validates the checkpoint index, the FP8 scales and
 the tokenizer, and prints the exact output size without reading tensor data.
@@ -65,10 +67,15 @@ type_bytes: Q8_0     20188545024   (attention, shared experts, dense FFN, embedd
 type_bytes: F32        420030720   (norms, routers, indexer projections)
 ```
 
-The conversion is CPU bound.  IQ2_XXS costs about 7 s per 2048x6144 expert
-matrix per core; there are 43,200 of them.  `--resume` continues an interrupted
-run.  `--provisional-q2k` swaps the routed experts to Q2_K (about 5x faster,
-185 GiB) when a calibration model is wanted.
+On the CPU, IQ2_XXS costs about 7 s per 2048x6144 expert matrix per core and
+there are 43,200 of them (nine hours on 20 cores).  With a CUDA GPU add
+`--cuda --cuda-batch 32`: the routed experts are quantized by the PyTorch port
+in `gguf-tools/iq2xxs_cuda.py`, byte-identical to the C quantizer for the
+same importance vector, at about 30 ms per expert on a B200 (the whole model
+in about 30 minutes, ~25 GiB of VRAM).  See the
+[GGUF tools README](../gguf-tools/README.md#iq2_xxs-on-a-cuda-gpu).
+`--resume` continues an interrupted run.  `--provisional-q2k` swaps the routed
+experts to Q2_K (185 GiB) when a calibration model is wanted.
 
 ### Imatrix
 
@@ -129,6 +136,8 @@ depend on the generation budget.
 * `gguf-tools/glm53_manifest.py`: `glm53_full_spec(config)` derives block
   count, MTP presence, routed expert count and indexer owner layers from
   `config.json`; the index validator takes that spec.
+* `gguf-tools/iq2xxs_cuda.py`: IQ2_XXS routed-expert quantization on CUDA,
+  byte-identical to `quants.c`; `--cuda` in both GLM quantizers.
 * `gguf-tools/glm53_full_quantize.py`: no hardcoded 256/79/78; GGUF metadata
   (`glm-dsa.expert_count`, `glm-dsa.block_count`,
   `glm-dsa.nextn_predict_layers`) follows the checkpoint; `--model-name` and
