@@ -31,7 +31,7 @@ LM Studio / MLX.
 
 | Runtime | Loads this file? |
 |---|---|
-| `ds4-glm-slim` fork, Metal | yes (upstream code paths; the fork only relaxes the shape check) |
+| [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork, Metal | yes (upstream code paths; the fork only relaxes the shape check) |
 | `ds4-glm-slim` fork, CUDA | yes (fork adds IQ2_XXS-down kernels and resident weights) |
 | `ds4-glm-slim` fork, ROCm | shape check passes; routed kernels untested |
 | upstream `antirez/ds4` | no — `expected expert_count=256 for GLM 5.2, got 192` |
@@ -47,7 +47,7 @@ commits. It keeps running the official GLM 5.2/5.3 and DeepSeek files.
 
 ```sh
 xcode-select --install        # once, if the command-line tools are missing
-git clone <ds4-glm-slim repository URL> ds4
+git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4
 cd ds4
 make
 ./ds4 --help | head -3
@@ -62,7 +62,7 @@ Needs the NVIDIA driver, a CUDA toolkit with `nvcc` and cuBLAS (12.x or 13.x),
 and a C compiler.
 
 ```sh
-git clone <ds4-glm-slim repository URL> ds4
+git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4
 cd ds4
 make cuda-generic             # -arch=native: builds for the GPU in the machine
 # or an explicit architecture, e.g. Blackwell B200:
@@ -93,7 +93,8 @@ Place the file where you like; the examples use `gguf/` inside the repository
 mkdir -p gguf
 # copy / download GLM-5.3-SLIM-E192-IQ2_XXS.gguf into gguf/
 ls -l gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf     # 160760301792 bytes
-shasum -a 256 gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf   # compare with the .sha256 file
+shasum -a 256 gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf
+# expected: 68abcb6effe4e7a4379d92f68607dfbd1aca0a1fad5dabda78a96f1a4a0e4725
 ```
 
 Keep it on a fast local SSD. Resident runs read the whole file once at start

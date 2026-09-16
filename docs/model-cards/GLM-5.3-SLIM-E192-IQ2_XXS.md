@@ -32,8 +32,8 @@ IQ2_XXS routed experts, Q8_0 everything else — to that pruned checkpoint. The
 published full GLM 5.3 Q2 is 197 GiB; this one is **149.7 GiB**, small enough
 to stay resident on hardware where the full model needs SSD streaming.
 
-It runs with the **`ds4-glm-slim` fork** of DwarfStar (a few changes on top of
-upstream `antirez/ds4`, see [Requirements](#requirements)). It is not a
+It runs with the **[`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork** of DwarfStar (a few changes
+on top of upstream `antirez/ds4`, see [Requirements](#requirements)). It is not a
 llama.cpp GGUF: the tensor layout, quant mix and metadata follow DwarfStar's
 GLM-DSA format.
 
@@ -49,7 +49,7 @@ GLM-DSA format.
 | Context | 1,048,576 positions in metadata; use what your memory allows |
 | Routed experts | IQ2_XXS, 2.0625 bits/weight, weight-energy importance (no imatrix) |
 | Everything else | Q8_0 (attention, shared experts, dense FFN, embeddings, output head); F32 norms/routers/indexer projections |
-| Runtime | DwarfStar fork `ds4-glm-slim` (Metal, CUDA; ROCm untested) |
+| Runtime | DwarfStar fork [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) (Metal, CUDA; ROCm untested) |
 | Fits | 1× 180 GB GPU (B200/GB200) resident; 256 GB+ Mac resident; 192 GB Mac resident with a small context; 128 GB Mac via SSD streaming |
 | Source checkpoint | [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192) (FP8), revision `e45b62eb` |
 | License | GLM-5.3 (same as the base model) |
@@ -86,7 +86,7 @@ Everything else — CLI, agent, HTTP server, KV snapshots, tool calling,
 thinking control — is unchanged DwarfStar. Build it:
 
 ```sh
-git clone <ds4-glm-slim repository URL> ds4
+git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4
 cd ds4
 make                # Apple Silicon / Metal
 make cuda-generic   # NVIDIA, local GPU architecture (needs nvcc + cuBLAS)
@@ -128,7 +128,7 @@ AIME 2025; thinking on, default budgets), CUDA B200:
 
 | Suite | Result |
 |---|---|
-| core (92 cases) | _running — will be filled in_ |
+| core (92 cases) | in progress: 8 / 8 correct so far (this table is updated when the run finishes) |
 | probe (first 3 cases) | 3 / 3 |
 
 `ds4-eval` scores are integration checks, not leaderboard numbers; compare
@@ -197,7 +197,7 @@ python3 gguf-tools/glm53_full_quantize.py \
 
 ```text
 size    160760301792 bytes
-sha256  (see GLM-5.3-SLIM-E192-IQ2_XXS.gguf.sha256)
+sha256  68abcb6effe4e7a4379d92f68607dfbd1aca0a1fad5dabda78a96f1a4a0e4725
 ```
 
 ## License and credits
@@ -207,4 +207,4 @@ sha256  (see GLM-5.3-SLIM-E192-IQ2_XXS.gguf.sha256)
 * Expert pruning: cloudyu (GLM-5.3-SLIM-E192).
 * Inference engine and quant recipe: Salvatore Sanfilippo and the DwarfStar
   contributors (`antirez/ds4`), building on llama.cpp / GGML.
-* Fork, CUDA quantizer and this build: yuhai-china.
+* Fork, CUDA quantizer and this build: yuhai-china — https://github.com/yuhai-china/ds4-glm-slim.

@@ -6,8 +6,12 @@
 > [antirez/ds4](https://github.com/antirez/ds4) that adds support for
 > expert-pruned full GLM 5.3 checkpoints such as GLM-5.3-SLIM-E192 (192 of 256
 > routed experts, no MTP block, 149.7 GiB as IQ2_XXS). See
-> [docs/GLM53_SLIM.md](docs/GLM53_SLIM.md). Everything else is unchanged upstream
-> DwarfStar; it is not intended to be merged back.
+> [docs/GLM53_SLIM.md](docs/GLM53_SLIM.md) and the
+> [model card](docs/model-cards/GLM-5.3-SLIM-E192-IQ2_XXS.md) /
+> [running guide](docs/model-cards/GLM-5.3-SLIM-E192-IQ2_XXS-RUNNING.md) of the
+> IQ2_XXS build. Everything else is unchanged upstream DwarfStar; it is not
+> intended to be merged back. Branch `glm53-slim` carries the changes, `main`
+> tracks upstream.
 
 **DwarfStar** aims to be the best way to run a few excellent large
 language models on consumer hardware (that is, hardware that people
