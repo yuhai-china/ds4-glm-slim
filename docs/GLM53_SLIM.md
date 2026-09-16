@@ -103,9 +103,28 @@ python3 gguf-tools/glm53_full_quantize.py ... \
 # Metal, 128 GB machine
 ./ds4 -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --ssd-streaming --ctx 16384
 
-# CUDA, one GPU
-./ds4-server -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --gpu-devices 0 --gpu-vram auto --ctx 65536
+# CUDA, one GPU with room for the whole model (no --gpu-vram/--gpu-devices)
+./ds4-server -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ctx 65536
 ```
+
+CUDA specifics added by this fork:
+
+* Upstream's CUDA routed-MoE path knows IQ2_XXS gate/up only with Q2_K down
+  projections; the all-IQ2_XXS GLM layout returned 0 silently and the first
+  MoE layer failed (`GLM prefill failed`). The fork runs it: prefill on the
+  mmq GEMM tier with a type-selected down GEMM, decode on the mmvq vector
+  kernels. Unsupported type pairs are now reported.
+* On a single discrete GPU with `model + 8 GiB` free the model image is copied
+  into device memory at start (150 GiB in about 22 s on a B200). Upstream
+  pins the mmap as a zero-copy host mapping instead — right for DGX Spark's
+  unified memory, but on a discrete card every token then streams the routed
+  experts over PCIe (about 1 t/s). `DS4_CUDA_COPY_MODEL=1` forces the copy,
+  `DS4_CUDA_NO_MODEL_COPY=1` keeps the mapping.
+* The GLM memory guard reserves `memory/16` (at least 6 GiB) on discrete CUDA
+  instead of the unified-memory 32 GiB; `DS4_GLM_MEMORY_GUARD_RESERVE_GB`
+  still overrides.
+* Measured on one B200 with this file: 21 t/s decode, 44 t/s prefill on a
+  30-token prompt (fixed cost dominated).
 
 Notes:
 
@@ -131,6 +150,12 @@ Add `--cuda --gpu-devices 0 --gpu-vram auto` on CUDA hosts.  Compare against
 the published full GLM 5.3 Q2 on the same suite and machine; absolute numbers
 depend on the generation budget.
 
+## Model card and user guide
+
+`GLM-5.3-SLIM-E192-GGUF/README.md` (model card) and `RUNNING.md` (memory
+planning, Metal/CUDA setup, server, agent, troubleshooting) ship next to the
+GGUF; they are the user-facing counterpart of this page.
+
 ## What changed in this fork
 
 * `gguf-tools/glm53_manifest.py`: `glm53_full_spec(config)` derives block
@@ -145,6 +170,10 @@ depend on the generation budget.
 * `ds4.c`: `config_validate_glm_dsa_model` accepts the GGUF's expert count,
   block count and MTP block count (bounded by `DS4_MAX_EXPERT`,
   `DS4_MAX_LAYER`); the GLM 5.2 streaming hot seed is only applied to the
-  original shape.
+  original shape; discrete-CUDA default for the GLM memory guard reserve.
+* `ds4_cuda.cu`: IQ2_XXS down projections in `routed_moe_launch` (mmq tier
+  for prefill, mmvq kernels for decode), `n_total_expert` instead of a
+  literal 256 in the GLM Q2_K path, and the resident model copy for single
+  discrete GPUs in `ds4_gpu_register_model_map_no_copy`.
 
 The official GLM 5.2 / 5.3 GGUFs keep working unchanged.
