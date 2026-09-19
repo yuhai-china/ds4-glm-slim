@@ -6143,6 +6143,35 @@ static void config_validate_glm53_model(const ds4_model *m) {
     g_ds4_shape = DS4_SHAPE_GLM53;
     memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
 
+    /* Expert-pruned GLM 5.3 Flash derivatives (GLM-5.3-Flash-E256o, E224n, ...)
+     * keep fewer routed experts and ship without the MTP block.  Take the
+     * routed expert count, the trunk block count and the MTP block count from
+     * the GGUF; every other dimension must still match the official shape. */
+    {
+        const uint32_t n_expert_gguf = required_u32(m, "glm5-next.expert_count");
+        const uint32_t n_trunk_gguf = required_u32(m, "glm5-next.trunk_block_count");
+        const uint32_t n_nextn_gguf = required_u32(m, "glm5-next.nextn_predict_layers");
+        if (n_nextn_gguf > 1) {
+            ds4_die("glm5-next.nextn_predict_layers must be 0 or 1");
+        }
+        if (n_trunk_gguf != DS4_SHAPE_GLM53.n_layer - DS4_SHAPE_GLM53.n_nextn_predict) {
+            ds4_die("glm5-next.trunk_block_count does not match GLM 5.3 Flash");
+        }
+        if (n_expert_gguf > DS4_MAX_EXPERT ||
+            n_expert_gguf < DS4_SHAPE_GLM53.n_expert_used) {
+            ds4_die("glm5-next.expert_count is out of range for this build");
+        }
+        g_ds4_shape.n_expert = n_expert_gguf;
+        g_ds4_shape.n_nextn_predict = n_nextn_gguf;
+        g_ds4_shape.n_layer = n_trunk_gguf + n_nextn_gguf;
+        if (n_expert_gguf != DS4_SHAPE_GLM53.n_expert ||
+            n_nextn_gguf != DS4_SHAPE_GLM53.n_nextn_predict) {
+            fprintf(stderr,
+                    "ds4: GLM 5.3 Flash variant: %u routed experts, %u blocks, %u MTP block(s)\n",
+                    n_expert_gguf, g_ds4_shape.n_layer, n_nextn_gguf);
+        }
+    }
+
     config_expect_u32("block_count", required_u32(m, "glm5-next.block_count"), DS4_N_LAYER);
     config_expect_u32("trunk_block_count", required_u32(m, "glm5-next.trunk_block_count"),
                       DS4_N_LAYER - DS4_N_NEXTN_PREDICT);
