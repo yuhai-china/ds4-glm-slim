@@ -38,7 +38,7 @@ encoder file (tested); no MTP draft block.
 | Headroom on a 128 GB Spark after weights + graph | ~25 GiB | **~40 GiB** |
 | Comfortable context on a Spark | 16–32 K | **64 K+** (KV ≈ 0.05 GiB per 4 K tokens) |
 | Generation speed | same | same (identical work per token) |
-| Vision (`--vision` + stock encoder GGUF) | yes | **yes** (tested) |
+| Vision (`--vision` + stock encoder GGUF) | yes | **yes** — same encoder file, tested ([details](#vision-multimodal-use)) |
 | MTP speculative decoding | yes | no |
 | Runtime | `antirez/ds4` | `yuhai-china/ds4-glm-slim` (upstream pins 288 experts) |
 
@@ -60,25 +60,103 @@ mkdir -p gguf && mv /path/to/glm-5.3-flash-e256-q2.gguf gguf/
 ./ds4-agent  -m gguf/glm-5.3-flash-e256-q2.gguf --cuda --ctx 65536     # built-in coding agent
 ```
 
-Images: add DwarfStar's stock GLM 5.3 Flash encoder (1.1 GB, `./download_model.sh glm53-vision`) — the
-pruning did not touch the vision tower or the projector, so the unmodified encoder matches this file:
-
-```sh
-./ds4-server -m gguf/glm-5.3-flash-e256-q2.gguf --cuda --ctx 65536 \
-  --vision gguf/GLM-5.3-Flash-Vision-Encoder.gguf      # PNG/JPEG via OpenAI/Anthropic image blocks
-./ds4 … --vision gguf/GLM-5.3-Flash-Vision-Encoder.gguf  # then /read image.png in the chat
-```
-
 Startup prints `ds4: GLM 5.3 Flash variant: 256 routed experts, 45 blocks, 0 MTP block(s)`. The
 model stays in unified memory (no copy); first load is limited by reading 79 GiB from disk, so keep
 the file on the internal NVMe. Thinking is on by default — `--nothink` for direct answers, `/think`
 and `/nothink` in the chat, and the server honours the GLM `reasoning_effort` field
 (`low`/`high`/`max`). Do not pass `--mtp`. For several concurrent users:
 `./ds4-server … --ctx 32768 --batched-session 4`. Client setup (Pi, OpenCode, Codex CLI, Claude Code)
-is in the fork's `docs/CLIENTS.md`.
+is in the fork's `docs/CLIENTS.md`. Image input: see [Vision](#vision-multimodal-use) below.
 
 Also runs on a 128 GB Apple Silicon Mac (`make`, drop `--cuda`) and on discrete NVIDIA GPUs with
 ≥ 90 GB of VRAM (`make cuda-generic`).
+
+## Vision (multimodal use)
+
+GLM 5.3 Flash is a vision-language model, and this file keeps that: the pruning removed routed
+experts only, so the vision tower and the image projector are untouched and DwarfStar's **stock,
+unmodified** GLM 5.3 Flash encoder file matches this GGUF. The encoder is a separate 1.1 GB GGUF
+(as with the stock Q2); it is not bundled here.
+
+### Setup
+
+```sh
+./download_model.sh glm53-vision          # fetches gguf/GLM-5.3-Flash-Vision-Encoder.gguf (1.1 GB)
+```
+
+or take the file from the DwarfStar repository `antirez/glm-5.3-flash-gguf`. Memory cost on the
+Spark: ~1.1 GB weights plus a few hundred MB while encoding — still ~38 GiB of headroom.
+
+### Chat CLI
+
+```sh
+./ds4 -m gguf/glm-5.3-flash-e256-q2.gguf --cuda --ctx 65536 \
+      --vision gguf/GLM-5.3-Flash-Vision-Encoder.gguf
+> /read photo.jpg          # ds4: image 640x400, 345 image tokens -> the model describes it
+> 图里的文字是什么？         # follow-up questions refer to the image already in the conversation
+```
+
+`/read FILE` with a PNG or JPEG sends the image as a turn of its own (the model responds to it
+immediately); text files are read as text. Use several `/read` commands for several images.
+
+### Coding agent
+
+```sh
+./ds4-agent -m gguf/glm-5.3-flash-e256-q2.gguf --cuda --ctx 65536 \
+            --vision gguf/GLM-5.3-Flash-Vision-Encoder.gguf
+```
+
+With `--vision` the agent gains the `view_image` tool: it can open screenshots, UI mock-ups, diagrams
+or rendered plots in the working directory on its own. Agent sessions containing images cannot yet
+be saved with `/save` (upstream limitation).
+
+### Server (OpenAI / Anthropic / Responses APIs)
+
+```sh
+./ds4-server -m gguf/glm-5.3-flash-e256-q2.gguf --cuda --ctx 65536 \
+             --vision gguf/GLM-5.3-Flash-Vision-Encoder.gguf         # :8000
+```
+
+Images are sent inline: OpenAI chat and Responses accept PNG/JPEG `data:` URIs, Anthropic accepts
+`base64` image sources. Remote URLs and server-side file paths are rejected; up to 16 images per
+request, 64 MiB body. Image blocks keep their order relative to text.
+
+```python
+import base64, json, urllib.request
+img = base64.b64encode(open("chart.png", "rb").read()).decode()
+body = {"model": "glm", "temperature": 0, "max_tokens": 400,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + img}},
+            {"type": "text", "text": "Read the chart: what is compared and what are the values? /nothink"}]}]}
+req = urllib.request.Request("http://127.0.0.1:8000/v1/chat/completions",
+                             data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"])
+```
+
+Any OpenAI-compatible client that supports image blocks (Open WebUI, Pi, OpenCode, Cline, …) works the
+same way; point it at `http://<spark>:8000/v1`.
+
+### Tips
+
+* `/nothink` (or `reasoning_effort: low`) is usually enough for description, OCR and chart reading;
+  keep thinking on for visual maths/diagram reasoning.
+* Image cost: about one prompt token per 28×28-pixel block (a 640×400 image ≈ 350 tokens, a
+  1-megapixel photo ≈ 1 300), capped at 8 000 tokens (≈ 6 MP; larger photos are downscaled with
+  aspect ratio kept). Encoding took ~1–2 s on a B200; expect a few seconds on the Spark. Pre-resizing
+  photos to ~1 MP keeps requests fast without hurting OCR of normal text.
+* Chinese and English prompts both work; the model answers in the language of the question.
+
+### Tested
+
+On the B200 with this file + stock encoder through `ds4-server`:
+
+| Input | Result |
+|---|---|
+| Synthetic image: red circle, blue square, caption "DGX SPARK 128GB" (Chinese question) | shapes, colours, positions and text all correct |
+| Bar chart, two bars 90 vs 78.9 GiB (English question) | both values read, difference computed as 11.1 GiB / 12.3 % |
+
+The 256-expert model scores **MMMU 76.1** at 4-bit under vLLM (full vision pipeline); the 2-bit
+routed experts of this file only affect the language side.
 
 ## Performance
 
@@ -136,10 +214,7 @@ the one published.
 Qualitative checks: correct answers to bilingual common-sense and medical questions, no
 Chinese/English mixing, correct code generation (e.g. a palindrome checker with Chinese test strings).
 
-**Vision** (this file + stock encoder, `ds4-server`, B200): shapes/colours/text in a synthetic image
-described correctly in Chinese ("红色的圆形 … 蓝色的正方形 … DGX SPARK 128GB"); a bar chart read
-correctly (both values, the 11.1 GiB / 12.3 % difference computed). ~6 s per image request including
-encoding (377–385 prompt tokens). The 256-expert model scores MMMU 76.1 at 4-bit under vLLM.
+Image understanding: see [Vision](#vision-multimodal-use).
 
 ## What is in the file
 
