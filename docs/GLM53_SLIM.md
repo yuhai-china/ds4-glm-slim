@@ -177,7 +177,7 @@ moe-slim prune /path/to/GLM-5.3-Flash /path/to/GLM-5.3-Flash-E256o-FP8 --keep 25
 python -m moe_slim.calib.imatrix /path/to/GLM-5.3-Flash-E256o-FP8 --cache ... --out e256o_imatrix.dat
 python3 gguf-tools/glm53_quantize.py --hf /path/to/GLM-5.3-Flash-E256o-FP8 \
   --tokenizer-template gguf/GLM-5.3-tokenizer.gguf --artifact q2 --model-name GLM-5.3-Flash-E256o \
-  --imatrix e256o_imatrix.dat --cuda --cuda-batch 32 --out gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf
+  --cuda --cuda-batch 32 --out gguf/glm-5.3-flash-e256-q2.gguf
 ```
 
 Result: 78.9 GiB (IQ2_XXS gate/up, Q2_K down, Q8_0 elsewhere) against 90 GiB for the
