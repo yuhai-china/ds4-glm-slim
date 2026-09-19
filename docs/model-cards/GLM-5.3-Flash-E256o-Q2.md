@@ -16,112 +16,137 @@ tags:
 - dwarfstar
 - ds4
 - dgx-spark
+- gb10
 ---
 
-# GLM-5.3-Flash-E256o — Q2 GGUF for DwarfStar (ds4): GLM 5.3 Flash on a DGX Spark or a 128 GB Mac
+# GLM-5.3-Flash-E256o Q2 — GLM 5.3 Flash tuned for the DGX Spark
 
-**78.9 GiB. GLM-5.3-Flash with 256 of 288 routed experts, routed experts in imatrix-guided
-IQ2_XXS (gate/up) + Q2_K (down), everything else Q8_0/BF16 — the same recipe as DwarfStar's
-published GLM 5.3 Flash Q2 (90 GiB), 11 GiB smaller, so a 128 GB machine keeps ~40 GiB for context.**
+**Built for the 128 GB DGX Spark (GB10): a 78.9 GiB GGUF of GLM-5.3-Flash that leaves ~40 GiB of
+unified memory for context and the rest of the system, in the exact tensor layout DwarfStar's Spark
+CUDA kernels are optimised for.**
 
-Built from the FP8 checkpoint of [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash)
-with the expert selection of GLM-5.3-Flash-E256o (the 256-expert NVFP4 model evaluated at HumanEval
-97.6 / C-Eval 89.4 / MMMU 76.1 / BFCL Live 80.5 under vLLM); experts were copied byte-exactly from
-FP8 and quantized once, not re-quantized from the 4-bit release. Runs with the
-[`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork of DwarfStar (upstream pins the
-Flash shape to 288 experts + MTP block). No MTP head: `--mtp` is not available.
+DwarfStar (`ds4`) already runs GLM 5.3 Flash on a Spark with its published Q2 file, but at 90 GiB
+that build is "close enough to a 128 GB machine's memory budget that other workloads and context size
+matter". This build removes the 32 least-used routed experts per layer first (256 of 288 kept,
+selected on a bilingual code / agent / science / maths calibration mix) and then applies the same
+Q2 recipe — **IQ2_XXS gate/up + Q2_K down routed experts, Q8_0 everything else** — the layout that
+DwarfStar's Spark path (`make cuda-spark`, aligned IQ2_XXS/Q2_K MoE kernels) is built around.
+The result is 11 GiB smaller than the stock Q2 with the same per-token speed.
 
-| File | Size | Importance | Use |
-|---|---:|---|---|
-| `GLM-5.3-Flash-E256o-Q2-imatrix.gguf` | 84,694,295,648 B (78.9 GiB) | activation imatrix (1.64 M tokens, 10 domains) | **recommended** |
-| `GLM-5.3-Flash-E256o-Q2-fallback.gguf` | 84,694,295,648 B | weight-energy heuristic | reference / A-B |
+| | Stock DwarfStar GLM 5.3 Flash Q2 | **GLM-5.3-Flash-E256o Q2** |
+|---|---|---|
+| Size | 90 GiB | **78.9 GiB** |
+| Routed experts / layer | 288 | **256** (top-8 active, unchanged) |
+| Headroom on a 128 GB Spark (after weights + graph) | ~25 GiB | **~40 GiB** |
+| Comfortable context on a Spark | 16–32 K | **64 K+** (KV: ~0.05 GiB per 4 K tokens) |
+| Runtime | upstream `antirez/ds4` | [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork (upstream pins 288 experts) |
+| MTP speculative decoding | yes | no (MTP block dropped) |
+| Importance matrix | yes | yes (1.64 M tokens, 10 domains) — plus a fallback-importance build for A/B |
 
-## What is in the file
+## Files
 
-| Role | Type | Bytes |
-|---|---|---:|
-| Routed experts gate / up (42 layers × 256) | IQ2_XXS (2.06 bpw) | 46.5 GB |
-| Routed experts down | Q2_K (2.63 bpw) | 29.6 GB |
-| KDA linear attention, DSA attention, dense FFN, shared experts | Q8_0 (+1.3 GB Q4_K) | 8.2 GB |
-| Embedding, output head | BF16 / Q8_0 | 1.3 GB |
-| Norms, routers, mHC, indexer | F32 | 0.2 GB |
+| File | Bytes | Notes |
+|---|---:|---|
+| `GLM-5.3-Flash-E256o-Q2-imatrix.gguf` | 84,694,295,648 | imatrix-guided routed experts — **default** |
+| `GLM-5.3-Flash-E256o-Q2-fallback.gguf` | 84,694,295,648 | weight-energy importance; same layout, for comparison |
 
-Architecture unchanged from GLM 5.3 Flash: 45 layers (3 dense + 42 MoE), KDA linear attention with
-DSA every fourth layer, hyper-connections, top-8 of 256 routed experts + 1 shared, 154 880-token
-vocabulary, 1 M-position RoPE. Vision encoder not included (text GGUF only, as upstream's).
-
-## Running
-
-### DGX Spark (GB10, 128 GB unified memory)
+## Quick start on a DGX Spark
 
 ```sh
 git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4 && cd ds4
-make cuda-spark
-./ds4 -m /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 32768          # chat
-./ds4-server -m /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536   # OpenAI API :8000
-./ds4-agent  -m /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536   # coding agent
+make cuda-spark                                   # GB10 build (sm_121)
+mkdir -p gguf && mv /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf gguf/
+
+./ds4        -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # chat
+./ds4-server -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # OpenAI API on :8000
+./ds4-agent  -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # native coding agent
 ```
 
-Expect the startup line `ds4: GLM 5.3 Flash variant: 256 routed experts, 45 blocks, 0 MTP block(s)`.
-Memory: 78.9 GiB weights + ~3 GiB graph + KV (KDA layers keep a constant state; the 11 DSA layers
-use a compact cache of ~0.05 GiB per 4 K tokens), so 64 K contexts fit comfortably. The Spark path
-uses upstream's integrated-memory mapping and the aligned IQ2_XXS/Q2_K kernels for this exact
-layout; speed should match upstream's GLM 5.3 Flash Q2 figures on Spark (this build was not run on
-a Spark by the author).
+The first log lines must include `ds4: GLM 5.3 Flash variant: 256 routed experts, 45 blocks, 0 MTP block(s)`.
+On the Spark the model stays in unified memory (no copy); startup cost is the 79 GiB read from disk,
+so keep the file on the internal NVMe. Thinking is on by default — `--nothink` for direct answers,
+`/think` and `/nothink` inside the chat; the GLM template's `reasoning_effort` (`low`/`high`/`max`)
+is honoured by the server. `--power 100` (default) is required for GLM. Do not pass `--mtp`.
 
-### Apple Silicon 128 GB (Metal)
+Serving several users: `./ds4-server … --ctx 32768 --batched-session 4` (context × sessions must
+fit; single-GPU CUDA runs the rows as an ordered fallback, i.e. fair scheduling rather than a
+throughput multiplier). Client setup for Pi / OpenCode / Codex CLI / Claude Code is in the fork's
+`docs/CLIENTS.md`.
 
-```sh
-make
-./ds4 -m /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --ctx 32768
-```
+### Also runs on
 
-### Discrete NVIDIA GPU (measured: one B200)
+* **128 GB Apple Silicon** (`make`, Metal): same commands without `--cuda`.
+* **Discrete NVIDIA GPUs** with ≥ 90 GB (`make cuda-generic`): the fork copies the model into
+  VRAM; measured on one B200: 38 t/s decode, 84 t/s prefill on a short prompt.
 
-`make cuda-generic`, then the same commands with `--cuda`. The fork copies the model into VRAM when it
-fits (79 GiB here). Measured on a B200: 38 t/s decode, 84 t/s prefill on a 60-token prompt.
+The Spark and Mac paths are upstream's, exercised by the stock 90 GiB Q2; this file was validated
+by the author on the B200 only.
 
-Notes: thinking is on by default (`--nothink` for direct answers; the GLM template's
-`reasoning_effort` is `low`/`high`/`max`); GLM requires `--power 100` (default); no MTP speculative
-decoding.
+## What changed versus stock GLM 5.3 Flash
+
+* **Experts**: 256 of 288 routed experts per layer, chosen by router-weighted activation mass over
+  eleven calibration domains (on-policy GLM traces for general chat, code, tool calling and
+  olympiad maths; public science, Chinese, code, agent and maths sets). Attention, KDA layers,
+  dense FFN, shared experts, router, tokenizer and chat template are untouched.
+* **Quantization**: routed experts IQ2_XXS (gate/up, 2.06 bpw) and Q2_K (down, 2.63 bpw), guided by
+  an importance matrix collected on the pruned model; KDA/DSA attention, dense FFN and shared
+  experts Q8_0; embeddings/output BF16-Q8; norms/routers F32. Experts were taken byte-exactly from
+  the FP8 release and quantized once (not re-quantized from a 4-bit checkpoint).
+* **Removed**: the MTP draft block (no speculative decoding) and the vision encoder (text GGUF, as
+  upstream's Flash Q2).
+
+| Role | Type | Bytes |
+|---|---|---:|
+| Routed experts gate / up (42 layers × 256) | IQ2_XXS | 46.5 GB |
+| Routed experts down | Q2_K | 29.6 GB |
+| KDA + DSA attention, dense FFN, shared experts | Q8_0 (+1.3 GB Q4_K) | 8.2 GB |
+| Embedding, output head | BF16 / Q8_0 | 1.3 GB |
+| Norms, routers, mHC, indexer | F32 | 0.2 GB |
 
 ## Quality
 
-`ds4-eval` probe (first 15 core cases: GPQA Diamond, SuperGPQA, AIME 2025; thinking on, default
-budgets), one B200:
+The 256-expert selection itself was evaluated at 4 bit under vLLM (GLM-5.3-Flash-E256o):
+HumanEval 97.6, C-Eval 89.4, MMMU 76.1, GPQA-Diamond 77.3 (low effort), AIME 2025 74.2,
+BFCL Non-Live 87.7 / Live 80.5 / multi-turn 73–75 — the pruning costs little; the 2-bit routed
+experts of this GGUF add their own loss, mostly on the hardest reasoning.
 
-| build | passed |
-|---|---|
-| imatrix | _filled in below_ |
-| fallback importance | _filled in below_ |
+`ds4-eval` (DwarfStar's built-in harness; GPQA Diamond, SuperGPQA, AIME 2025; thinking on, default
+budgets, greedy), one B200, first 15 core cases:
 
-Qualitative: bilingual common-sense and medical questions answer correctly; Chinese and English do
-not mix; code generation is intact (palindrome function with Chinese test cases).
+| build | passed | notes |
+|---|---|---|
+| imatrix | 13 / 15 | one AIME problem hit the 16 000-token budget, one AIME answer wrong |
+| fallback importance | 15 / 15 | |
 
-For the underlying 256-expert model's numbers under vLLM (NVFP4, no 2-bit loss) see the
-GLM-5.3-Flash-E256o model card: HumanEval 97.6, GPQA-Diamond 77.3 (low), C-Eval 89.4, AIME25 74.2,
-MMMU 76.1, BFCL Non-Live 87.7 / Live 80.5 / multi-turn 73–75. The 2-bit routed experts of this file
-add their own loss on top; the imatrix build is the one to use.
+Fifteen questions cannot separate the two builds (the two misses are hard AIME items that also
+trouble larger GLM 5.3 quants); a 40-case comparison is in progress and this table will be
+updated. Qualitatively both builds answer bilingual common-sense and medical questions correctly,
+keep Chinese and English separate, and produce correct code (palindrome function with Chinese test
+strings).
 
 ## How it was built
 
-1. `moe-slim prune zai-org/GLM-5.3-Flash (FP8) --keep 256` with the E256o statistics
-   (11 calibration domains, per-file normalised, zh 2 / math 3 / olympiad 2) → identical expert
-   selection to the NVFP4 E256o, FP8 experts byte-exact, MTP block dropped.
+1. `moe-slim prune` on the FP8 `zai-org/GLM-5.3-Flash` with the E256o statistics (11 domains,
+   per-file normalised; weights zh 2, math 3, olympiad 2, others 1–2) → 256 experts per layer,
+   MTP block dropped, 287 GB FP8 checkpoint.
 2. `python -m moe_slim.calib.imatrix` on that checkpoint: per-expert squared input activations
-   (gate/up) and squared router-weighted SwiGLU outputs (down) over 1.64 M tokens sampled evenly
-   from the ten calibration domains (DwarfStar's own collector is Metal-only).
-3. `gguf-tools/glm53_quantize.py --artifact q2 --imatrix … --cuda` (fork): IQ2_XXS gate/up on the
-   GPU (byte-identical to the C quantizer), Q2_K down and Q8_0 dense parts on the CPU; 40 minutes.
+   (gate/up) and squared router-weighted SwiGLU outputs (down), 1.64 M tokens sampled evenly from
+   the ten calibration domains — DwarfStar's own collector is Metal-only, this reproduces it on CUDA.
+3. `gguf-tools/glm53_quantize.py --artifact q2 --imatrix … --cuda` from the
+   [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork: IQ2_XXS gate/up on the GPU
+   (byte-identical to DwarfStar's C quantizer), Q2_K down and Q8_0 dense parts on the CPU; 40 minutes.
+
+Calibration text (117 k rows, 189 M tokens, all ten domains, verified against the calibration
+token streams) and the on-policy OlympiadBench traces are published separately.
 
 ## Limitations
 
-* 2-bit routed experts on top of an 11 % expert pruning: fine for chat, coding and agent use; expect
-  losses on the hardest reasoning versus the 4-bit vLLM deployment.
-* Not yet run on a DGX Spark or a Mac by the author; the CUDA discrete-GPU path was.
+* 2-bit routed experts on an 11 %-pruned model: chat, coding and agent use are the target; expect
+  a drop on the hardest maths/science reasoning versus the 4-bit vLLM deployment.
 * Requires the fork; upstream DwarfStar rejects the file (`expected expert_count=288`).
-* No MTP head, no vision encoder in this GGUF.
+* No MTP head, no vision encoder.
+* Not yet run on a DGX Spark by the author; the code paths are upstream's Spark paths.
 
-License: MIT (base model). Credits: Z.AI (GLM-5.3-Flash), Salvatore Sanfilippo and the DwarfStar
-contributors (`antirez/ds4`, quant recipe and runtime), llama.cpp/GGML (quant formats),
-[MOE-SLIM](https://github.com/yuhai-china/MOE-SLIM) (pruning, imatrix), yuhai-china (this build).
+License: MIT (base model). Credits: Z.AI (GLM-5.3-Flash); Salvatore Sanfilippo and the DwarfStar
+contributors (`antirez/ds4`: runtime, Spark kernels, Q2 recipe); llama.cpp/GGML (quant formats);
+[MOE-SLIM](https://github.com/yuhai-china/MOE-SLIM) (pruning, imatrix); yuhai-china (this build).
