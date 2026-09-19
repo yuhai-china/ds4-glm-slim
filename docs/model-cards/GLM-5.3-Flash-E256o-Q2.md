@@ -41,25 +41,25 @@ The result is 11 GiB smaller than the stock Q2 with the same per-token speed.
 | Comfortable context on a Spark | 16–32 K | **64 K+** (KV: ~0.05 GiB per 4 K tokens) |
 | Runtime | upstream `antirez/ds4` | [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) fork (upstream pins 288 experts) |
 | MTP speculative decoding | yes | no (MTP block dropped) |
-| Importance matrix | yes | yes (1.64 M tokens, 10 domains) — plus a fallback-importance build for A/B |
+| Importance matrix | yes | two builds: weight-energy (default) and activation imatrix (1.64 M tokens, 10 domains) |
 
 ## Files
 
 | File | Bytes | Notes |
 |---|---:|---|
-| `GLM-5.3-Flash-E256o-Q2-imatrix.gguf` | 84,694,295,648 | imatrix-guided routed experts — **default** |
-| `GLM-5.3-Flash-E256o-Q2-fallback.gguf` | 84,694,295,648 | weight-energy importance; same layout, for comparison |
+| `GLM-5.3-Flash-E256o-Q2-fallback.gguf` | 84,694,295,648 | weight-energy importance — **default** (see Quality) |
+| `GLM-5.3-Flash-E256o-Q2-imatrix.gguf` | 84,694,295,648 | activation imatrix (1.64 M tokens, 10 domains); same layout, for A/B |
 
 ## Quick start on a DGX Spark
 
 ```sh
 git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4 && cd ds4
 make cuda-spark                                   # GB10 build (sm_121)
-mkdir -p gguf && mv /path/to/GLM-5.3-Flash-E256o-Q2-imatrix.gguf gguf/
+mkdir -p gguf && mv /path/to/GLM-5.3-Flash-E256o-Q2-fallback.gguf gguf/
 
-./ds4        -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # chat
-./ds4-server -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # OpenAI API on :8000
-./ds4-agent  -m gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf --cuda --ctx 65536          # native coding agent
+./ds4        -m gguf/GLM-5.3-Flash-E256o-Q2-fallback.gguf --cuda --ctx 65536          # chat
+./ds4-server -m gguf/GLM-5.3-Flash-E256o-Q2-fallback.gguf --cuda --ctx 65536          # OpenAI API on :8000
+./ds4-agent  -m gguf/GLM-5.3-Flash-E256o-Q2-fallback.gguf --cuda --ctx 65536          # native coding agent
 ```
 
 The first log lines must include `ds4: GLM 5.3 Flash variant: 256 routed experts, 45 blocks, 0 MTP block(s)`.
@@ -110,17 +110,20 @@ HumanEval 97.6, C-Eval 89.4, MMMU 76.1, GPQA-Diamond 77.3 (low effort), AIME 202
 BFCL Non-Live 87.7 / Live 80.5 / multi-turn 73–75 — the pruning costs little; the 2-bit routed
 experts of this GGUF add their own loss, mostly on the hardest reasoning.
 
-`ds4-eval` (DwarfStar's built-in harness; GPQA Diamond, SuperGPQA, AIME 2025; thinking on, default
-budgets, greedy), one B200, first 15 core cases:
+`ds4-eval` (DwarfStar's built-in harness; GPQA Diamond, SuperGPQA, AIME 2025 interleaved; thinking
+on, 16 000-token budget, greedy), first 40 core cases on one B200:
 
-| build | passed | notes |
-|---|---|---|
-| imatrix | 13 / 15 | one AIME problem hit the 16 000-token budget, one AIME answer wrong |
-| fallback importance | 15 / 15 | |
+| build | passed | wrong | budget exhausted | generated tokens |
+|---|---:|---:|---:|---:|
+| fallback importance | **35 / 40** | 3 | 2 | 78 k |
+| imatrix | 31 / 40 | 4 | 5 | 168 k |
 
-Fifteen questions cannot separate the two builds (the two misses are hard AIME items that also
-trouble larger GLM 5.3 quants); a 40-case comparison is in progress and this table will be
-updated. Qualitatively both builds answer bilingual common-sense and medical questions correctly,
+Both builds miss the same four hardest items; the imatrix build additionally loses three GPQA items by
+running out of budget (it drifts into 15–16 k-token reasoning loops that the fallback build settles in
+1–3 k tokens) and one AIME item, while winning one SuperGPQA item. Forty questions is a coarse probe
+and the two are within noise on accuracy alone, but the token-usage pattern is consistent, so the
+fallback build is shipped as the default until a perplexity/KL comparison against the FP8 model says
+otherwise. Qualitatively both builds answer bilingual common-sense and medical questions correctly,
 keep Chinese and English separate, and produce correct code (palindrome function with Chinese test
 strings).
 
