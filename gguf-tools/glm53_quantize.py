@@ -370,6 +370,28 @@ def source_prefix(layer):
     return f"{LAYER_PREFIX}.{layer}"
 
 
+# Checkpoint layout (official GLM-5.3-Flash: 45 trunk layers + 1 MTP block, 288
+# routed experts).  configure_layout() overrides these from config.json so that
+# expert-pruned derivatives without an MTP block convert as well.
+EXPERT_COUNT = 288
+TRUNK_LAYERS = 45
+BLOCK_COUNT = 46
+MTP_BLOCK = 45
+NEXTN_PREDICT = 1
+
+
+def configure_layout(config):
+    global EXPERT_COUNT, TRUNK_LAYERS, BLOCK_COUNT, MTP_BLOCK, NEXTN_PREDICT
+    from glm53_manifest import glm53_flash_spec
+    spec = glm53_flash_spec(config)
+    EXPERT_COUNT = spec["expert_count"]
+    TRUNK_LAYERS = spec["trunk_layers"]
+    BLOCK_COUNT = spec["block_count"]
+    MTP_BLOCK = spec["mtp_block"]
+    NEXTN_PREDICT = spec["nextn_predict_layers"]
+    return spec
+
+
 def add_regular(
     plan,
     db,
@@ -402,20 +424,20 @@ def add_experts(plan, db, layer, part, qtype):
     shape = db.info(first)["shape"]
     if len(shape) != 2:
         fail(f"expert source is not a matrix: {first}")
-    for expert in range(288):
+    for expert in range(EXPERT_COUNT):
         name = f"{source_prefix(layer)}.mlp.experts.{expert}.{part}_proj.weight"
         if db.info(name)["shape"] != shape:
             fail(f"expert shape mismatch: {name}")
     gguf_name = f"blk.{layer}.ffn_{part}_exps.weight"
     item = TensorPlan(
         gguf_name,
-        (shape[1], shape[0], 288),
+        (shape[1], shape[0], EXPERT_COUNT),
         qtype,
         f"routed_{part}",
         source=f"{source_prefix(layer)}.mlp.experts.{{expert}}.{part}_proj.weight",
         expert_layer=layer,
         expert_part=part,
-        expert_count=288,
+        expert_count=EXPERT_COUNT,
     )
     item.nbytes = qtype_nbytes(qtype, item.shape)
     plan.append(item)
@@ -646,12 +668,12 @@ def build_plan(db, artifact):
         regular_qtype(artifact, "embedding", embedding_name, QTYPE_BF16),
         "embedding",
     )
-    for layer in range(46):
+    for layer in range(BLOCK_COUNT):
         prefix = source_prefix(layer)
-        if layer < 45:
+        if layer < TRUNK_LAYERS:
             add_mhc(plan, db, layer)
         add_regular(plan, db, f"blk.{layer}.attn_norm.weight", f"{prefix}.input_layernorm.weight", QTYPE_F32, "norm")
-        if layer < 45 and layer % 4 != 3:
+        if layer < TRUNK_LAYERS and layer % 4 != 3:
             add_linear_attention(plan, db, layer, artifact)
         else:
             add_dsa_attention(plan, db, layer)
@@ -664,14 +686,14 @@ def build_plan(db, artifact):
             "norm",
         )
         add_ffn(plan, db, layer, artifact)
-        if layer == 45:
-            add_regular(plan, db, "blk.45.nextn.eh_proj.weight", f"{prefix}.eh_proj.weight", QTYPE_BF16, "mtp")
-            add_regular(plan, db, "blk.45.nextn.enorm.weight", f"{prefix}.enorm.weight", QTYPE_F32, "mtp")
-            add_regular(plan, db, "blk.45.nextn.hnorm.weight", f"{prefix}.hnorm.weight", QTYPE_F32, "mtp")
+        if MTP_BLOCK is not None and layer == MTP_BLOCK:
+            add_regular(plan, db, f"blk.{layer}.nextn.eh_proj.weight", f"{prefix}.eh_proj.weight", QTYPE_BF16, "mtp")
+            add_regular(plan, db, f"blk.{layer}.nextn.enorm.weight", f"{prefix}.enorm.weight", QTYPE_F32, "mtp")
+            add_regular(plan, db, f"blk.{layer}.nextn.hnorm.weight", f"{prefix}.hnorm.weight", QTYPE_F32, "mtp")
             add_regular(
                 plan,
                 db,
-                "blk.45.nextn.shared_head_norm.weight",
+                f"blk.{layer}.nextn.shared_head_norm.weight",
                 f"{prefix}.shared_head.norm.weight",
                 QTYPE_F32,
                 "mtp",
@@ -700,25 +722,25 @@ def build_plan(db, artifact):
     return plan
 
 
-def model_metadata(hf_dir, source_revision):
-    layer_types = [0 if layer < 45 and layer % 4 != 3 else 1 for layer in range(46)]
+def model_metadata(hf_dir, source_revision, model_name="GLM-5.3-Flash"):
+    layer_types = [0 if layer < TRUNK_LAYERS and layer % 4 != 3 else 1 for layer in range(BLOCK_COUNT)]
     chat_path = os.path.join(hf_dir, "chat_template.jinja")
     with open(chat_path, "rb") as fp:
         chat_template = fp.read()
     records = [
         kv_string("general.architecture", "glm5-next"),
-        kv_string("general.name", "GLM-5.3-Flash"),
+        kv_string("general.name", model_name),
         kv_u32("general.alignment", GGUF_ALIGNMENT),
         kv_string("general.source.revision", source_revision),
-        kv_u32("glm5-next.block_count", 46),
-        kv_u32("glm5-next.trunk_block_count", 45),
-        kv_u32("glm5-next.nextn_predict_layers", 1),
+        kv_u32("glm5-next.block_count", BLOCK_COUNT),
+        kv_u32("glm5-next.trunk_block_count", TRUNK_LAYERS),
+        kv_u32("glm5-next.nextn_predict_layers", NEXTN_PREDICT),
         kv_u64("glm5-next.context_length", 1048576),
         kv_u32("glm5-next.embedding_length", 4096),
         kv_u32("glm5-next.vocab_size", 154880),
         kv_u32("glm5-next.feed_forward_length", 12288),
         kv_u32("glm5-next.expert_feed_forward_length", 2048),
-        kv_u32("glm5-next.expert_count", 288),
+        kv_u32("glm5-next.expert_count", EXPERT_COUNT),
         kv_u32("glm5-next.expert_used_count", 8),
         kv_u32("glm5-next.expert_shared_count", 1),
         kv_u32("glm5-next.leading_dense_block_count", 3),
@@ -1265,6 +1287,7 @@ def parse_args():
     parser.add_argument("--imatrix", help="legacy DS4/llama.cpp imatrix .dat")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--source-revision", default="84c6a6aa9497188e15a635ba793b0f95a79b1033")
+    parser.add_argument("--model-name", default="GLM-5.3-Flash", help="general.name")
     parser.add_argument("--quants-library", help="path to libds4quants")
     parser.add_argument("--cuda", action="store_true", help="quantize IQ2_XXS routed experts on a CUDA GPU (PyTorch)")
     parser.add_argument("--cuda-batch", type=int, default=8, help="experts per GPU call with --cuda")
@@ -1286,12 +1309,16 @@ def parse_args():
 
 def main():
     args = parse_args()
-    db = SourceDB(args.hf)
+    import functools
+    with open(os.path.join(args.hf, "config.json"), "rb") as fp:
+        spec = configure_layout(json.load(fp))
+    print(f"glm53-quantize: layout trunk={TRUNK_LAYERS} blocks={BLOCK_COUNT} mtp_block={MTP_BLOCK} routed_experts={EXPERT_COUNT}", file=sys.stderr)
+    db = SourceDB(args.hf, index_validator=functools.partial(validate_glm53_index, spec=spec))
     try:
         plan = build_plan(db, args.artifact)
         tokenizer_records, template_tokens = load_tokenizer_records(args.tokenizer_template)
         validate_tokenizer_template(args.hf, template_tokens, 154880)
-        kv_records = model_metadata(args.hf, args.source_revision)
+        kv_records = model_metadata(args.hf, args.source_revision, args.model_name)
         if args.artifact == "fp8":
             kv_records.append(kv_bool("glm5-next.native_fp8", True))
         if args.dry_run:

@@ -176,7 +176,31 @@ def expect_equal(actual, expected, label):
         fail(f"{label}: got {actual!r}, expected {expected!r}")
 
 
-def validate_glm53_index(weight_map):
+def glm53_flash_spec(config=None):
+    """Layout of a GLM-5.3-Flash checkpoint: 45 trunk layers (KDA except every
+    fourth, dense FFN in the first three), one optional MTP block, 288 routed
+    experts.  Expert-pruned derivatives (GLM-5.3-Flash-E256o, E224n, ...) keep
+    fewer experts and drop the MTP block; the layout is taken from config.json."""
+    if config is None:
+        trunk, nextn, n_expert = 45, 1, 288
+    else:
+        t = config.get("text_config", config)
+        trunk = int(t["num_hidden_layers"])
+        nextn = int(t.get("num_nextn_predict_layers", 0))
+        n_expert = int(t["n_routed_experts"])
+    if nextn not in (0, 1):
+        fail(f"unsupported num_nextn_predict_layers: {nextn}")
+    return {"trunk_layers": trunk, "block_count": trunk + nextn, "nextn_predict_layers": nextn,
+            "mtp_block": trunk if nextn else None, "expert_count": n_expert}
+
+
+def validate_glm53_index(weight_map, spec=None):
+    if spec is None:
+        spec = glm53_flash_spec()
+    trunk = spec["trunk_layers"]
+    block_count = spec["block_count"]
+    n_expert = spec["expert_count"]
+    mtp = spec["mtp_block"]
     names = set(weight_map)
     scopes = {tensor_scope(name) for name in names}
     if "unknown" in scopes:
@@ -209,17 +233,17 @@ def validate_glm53_index(weight_map):
             expert_ids.setdefault(layer, set()).add(int(expert.group(1)))
             expert_parts.setdefault((layer, int(expert.group(1))), set()).add(expert.group(2))
 
-    expected_linear = {layer for layer in range(45) if layer % 4 != 3}
-    expected_dsa = {layer for layer in range(45) if layer % 4 == 3} | {45}
-    expected_sparse = set(range(3, 46))
-    expect_equal(layers, set(range(46)), "language-model layer set")
-    expect_equal(hc_layers, set(range(45)), "mHC layer set")
+    expected_linear = {layer for layer in range(trunk) if layer % 4 != 3}
+    expected_dsa = {layer for layer in range(trunk) if layer % 4 == 3} | ({mtp} if mtp is not None else set())
+    expected_sparse = set(range(3, block_count))
+    expect_equal(layers, set(range(block_count)), "language-model layer set")
+    expect_equal(hc_layers, set(range(trunk)), "mHC layer set")
     expect_equal(linear_layers, expected_linear, "linear-attention layer set")
     expect_equal(dsa_layers, expected_dsa, "DSA layer set")
     expect_equal(sparse_layers, expected_sparse, "sparse FFN layer set")
     for layer in expected_sparse:
-        expect_equal(expert_ids.get(layer), set(range(288)), f"layer {layer} expert ids")
-        for expert in range(288):
+        expect_equal(expert_ids.get(layer), set(range(n_expert)), f"layer {layer} expert ids")
+        for expert in range(n_expert):
             expect_equal(
                 expert_parts.get((layer, expert)),
                 {"gate", "up", "down"},
@@ -230,11 +254,14 @@ def validate_glm53_index(weight_map):
         "model.language_model.embed_tokens.weight",
         "model.language_model.norm.weight",
         "lm_head.weight",
-        "model.language_model.layers.45.eh_proj.weight",
-        "model.language_model.layers.45.enorm.weight",
-        "model.language_model.layers.45.hnorm.weight",
-        "model.language_model.layers.45.shared_head.norm.weight",
     }
+    if mtp is not None:
+        required |= {
+            f"model.language_model.layers.{mtp}.eh_proj.weight",
+            f"model.language_model.layers.{mtp}.enorm.weight",
+            f"model.language_model.layers.{mtp}.hnorm.weight",
+            f"model.language_model.layers.{mtp}.shared_head.norm.weight",
+        }
     missing = sorted(required - names)
     if missing:
         fail(f"missing required tensors: {missing}")
