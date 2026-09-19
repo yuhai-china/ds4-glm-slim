@@ -216,8 +216,24 @@ the Q8_0 dense weights that cuBLAS uses (~10–15 GiB) + KV. `--ctx 65536` fits;
 
 ### DGX Spark / GB10 (integrated, 128 GB)
 
-`make cuda-spark`, then `--cuda --ssd-streaming`: unified memory holds only
-part of the model. Not exercised with this file.
+`make cuda-spark`, then `--cuda --ssd-streaming`: unified memory holds the
+19.2 GiB of non-expert weights, the context and a bounded expert cache; the
+remaining experts are read from NVMe per token.
+
+```sh
+./ds4 -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ssd-streaming --ctx 16384
+./ds4 -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ssd-streaming --ssd-streaming-cache-experts 64GB --ctx 16384
+```
+
+Plan printed by ds4 for a 40 GiB cache on our CUDA box (the same layout applies
+on a Spark): `resident model 19.19 GiB + expert cache 36.52 GiB (4029 experts,
+9.28 MiB each) + prefill expert reserve 3.48 GiB + KV 0.36 GiB + buffers 4 GiB`.
+On a 128 GB Spark a 64–72 GiB cache (≈ 7,000–7,700 of 14,400 expert slots) keeps
+the total near 95–100 GiB. Generation is NVMe-bound: low single-digit t/s once
+warm, slower while the cache fills (pruned files start cold). `--nothink` and
+a 16–32 K context keep paging down. Verified with this file on a B200 in
+streaming mode (correct output, 40 GiB cache, cold start); not run on a Spark
+by the author.
 
 ### Several GPUs
 

@@ -26,15 +26,16 @@ Expert pruning (192 of 256 routed experts, "SLIM") took 25 % off the model;
 DwarfStar's 2-bit routed-expert recipe took the rest. The result is a
 **149.7 GiB** file that stays fully resident on a single 180 GB GPU (B200,
 21 tokens/s measured) or a single Mac Studio (256 GB; 192 GB with a small
-context), and streams from SSD on a 128 GB Mac — hardware where the unpruned
-model needs a multi-GPU node or does not fit at all.
+context), and runs on a **128 GB DGX Spark** or 128 GB Mac through DwarfStar's
+SSD streaming (bounded expert cache in memory, the rest read from NVMe) —
+hardware where the unpruned model needs a multi-GPU node or does not fit at all.
 
 | GLM 5.3 form | Size | What it takes to run it |
 |---|---:|---|
 | Original FP8 (`zai-org/GLM-5.3`) | 756 GB | 8× H200/B200 or 4× B300, tensor parallel (88 GiB/GPU at TP=8: too big for 80 GB cards) |
 | Pruned FP8 (`cloudyu/GLM-5.3-SLIM-E192`) | 564 GB | 4× B200/B300 or 8× 80 GB cards |
 | Full GLM 5.3 IQ2_XXS GGUF (`antirez/glm-5.3-gguf`) | 197 GiB | 256 GB+ Mac resident; 128 GB Mac via SSD streaming; **does not fit one 180 GB GPU** |
-| **This file — SLIM IQ2_XXS GGUF** | **149.7 GiB** | **one 180 GB GPU resident (21 t/s); one Mac Studio resident (256 GB comfortably, 192 GB with a small context); 128 GB Mac via SSD streaming** |
+| **This file — SLIM IQ2_XXS GGUF** | **149.7 GiB** | **one 180 GB GPU resident (21 t/s); one Mac Studio resident (256 GB comfortably, 192 GB with a small context); one DGX Spark or 128 GB Mac via SSD streaming (CUDA streaming path verified with this file)** |
 
 The pruning is the enabler: at 2 bits the unpruned experts alone are 187 GB,
 so no single-device quantization of the original could fit a 180 GB card with
@@ -66,7 +67,7 @@ quant mix and metadata follow DwarfStar's GLM-DSA format.
 | Routed experts | IQ2_XXS, 2.0625 bits/weight, weight-energy importance (no imatrix) |
 | Everything else | Q8_0 (attention, shared experts, dense FFN, embeddings, output head); F32 norms/routers/indexer projections |
 | Runtime | DwarfStar fork [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) (Metal, CUDA; ROCm untested) |
-| Fits | **one** 180 GB GPU (B200/GB200) resident; **one** Mac Studio 256 GB resident, 192 GB resident with a small context; 128 GB Mac via SSD streaming |
+| Fits | **one** 180 GB GPU (B200/GB200) resident; **one** Mac Studio 256 GB resident, 192 GB resident with a small context; **one DGX Spark (GB10, 128 GB)** or 128 GB Mac via SSD streaming |
 | Source checkpoint | [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192) (FP8), revision `e45b62eb` |
 | License | GLM-5.3 (same as the base model) |
 
@@ -130,6 +131,48 @@ Add `--cuda` on NVIDIA hosts. On a 128 GB Mac add `--ssd-streaming`. See
 [RUNNING.md](RUNNING.md) for memory planning, streaming, server usage and
 troubleshooting.
 
+## DGX Spark (GB10, 128 GB)
+
+The whole 744B-class GLM 5.3 on a desktop box. 149.7 GiB does not fit the
+Spark's 128 GB, so DwarfStar's **SSD streaming** is used: attention, dense
+layers, shared experts, embeddings and the router (19.2 GiB) stay resident, a
+bounded cache holds the most-used routed experts, and the rest are read from
+the internal NVMe on demand.
+
+```sh
+git clone https://github.com/yuhai-china/ds4-glm-slim.git ds4 && cd ds4
+make cuda-spark                                  # GB10 build (sm_121)
+./ds4 -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ssd-streaming --ctx 16384
+# explicit cache size (automatic budget otherwise); leave room for the OS:
+./ds4 -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ssd-streaming \
+      --ssd-streaming-cache-experts 64GB --ctx 16384
+./ds4-server -m gguf/GLM-5.3-SLIM-E192-IQ2_XXS.gguf --cuda --ssd-streaming --ctx 16384   # API on :8000
+```
+
+What to expect:
+
+* Startup prints `ds4: GLM DSA variant: 192 routed experts, 78 blocks, 0 MTP block(s)`
+  and a streaming plan such as `resident model 19.19 GiB + expert cache … + KV …`.
+  With a 64 GiB cache about 7,000 of the 14,400 expert slots (each 9.28 MiB) are
+  resident — half of the model's experts, versus under a third for the stock
+  197 GiB full GLM 5.3 Q2 on the same machine, which is the point of the pruning
+  for streaming: fewer, more useful experts to page.
+* **Speed is NVMe-bound**: expect low single-digit tokens/s once the cache is
+  warm (upstream measured 4–5 t/s for the 197 GiB full model with a 61 GiB cache
+  on a 128 GB M5 Max; this file has 27 % fewer expert bytes to page). The first
+  requests are slower while the cache fills — pruned variants start cold because
+  DwarfStar's built-in GLM hot-expert seed uses the original expert numbering.
+  Keep the file on the internal NVMe, not USB storage.
+* Thinking and long prompts multiply the paging; `--nothink` and 16–32 K context
+  are the practical settings. Vision: the model has no vision encoder.
+* **If you want speed rather than the biggest model on a Spark**, use the
+  resident 78.9 GiB GLM-5.3-Flash-E256 Q2 (~18 t/s on a Spark). This file is
+  for when the answer quality of the 744B model matters more than latency.
+
+The CUDA streaming path was exercised with this exact file on our B200 (cache
+40 GiB, cold): correct Chinese output, plan as above. It has not been run on a
+Spark by the author; the Spark build and streaming code are upstream's.
+
 ## Quality
 
 The pruned FP8 base ([model card](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192))
@@ -142,10 +185,17 @@ own loss on top. Held-out perplexity of the FP8 base vs. the original: code
 This GGUF, `ds4-eval` (DwarfStar's built-in harness: GPQA Diamond, SuperGPQA,
 AIME 2025; thinking on, default budgets), CUDA B200:
 
-| Suite | Result |
-|---|---|
-| core (92 cases) | in progress: 8 / 8 correct so far (this table is updated when the run finishes) |
-| probe (first 3 cases) | 3 / 3 |
+| Set | Passed | Wrong | Out of budget |
+|---|---:|---:|---:|
+| GPQA Diamond (25) | 12 | 0 | 13 |
+| SuperGPQA (25) | 17 | 4 | 4 |
+| AIME 2025 (25) | 14 | 1 | 10 |
+| COMPSEC cybersecurity (17) | 15 | 2 | 0 |
+| **core total (92)** | **58** | 7 | 27 |
+
+Runtime 14 h 28 min at ~11 t/s. Most misses are budget exhaustions on the
+hardest GPQA/AIME items (the model keeps reasoning past the 16 000-token cap),
+not wrong answers; only 3 of the 27 were repetition loops.
 
 `ds4-eval` scores are integration checks, not leaderboard numbers; compare
 against the published full GLM 5.3 Q2 run on the same machine and suite.
@@ -158,7 +208,8 @@ replace this file's weight-energy importance.
 
 | Machine | Backend | Prefill | Decode |
 |---|---|---:|---:|
-| 1× NVIDIA B200 180 GB, model resident | CUDA | 44 t/s on a 30-token prompt (fixed cost dominated; mmq tier for long prompts) | 21 t/s |
+| 1× NVIDIA B200 180 GB, model resident | CUDA | 44 t/s on a 30-token prompt (fixed cost dominated; mmq tier for long prompts) | 21 t/s short context, ~10–11 t/s during long (2–8 K) thinking |
+| DGX Spark 128 GB, SSD streaming | CUDA | NVMe-bound | not measured by us; expect low single-digit t/s warm (see the Spark section) |
 | Apple Silicon | Metal | not measured by us | not measured by us |
 
 Metal figures for the full GLM 5.3 Q2 on the same class of Mac apply
@@ -201,10 +252,14 @@ python3 gguf-tools/glm53_full_quantize.py \
   Metal was not exercised by the author of this file; the code paths are
   upstream's, exercised by the 197 GiB full model.
 * **SSD streaming starts cold** on pruned variants (the built-in GLM 5.2 hot
-  seed uses the original expert numbering and is skipped).
-* **CUDA** needs a single GPU with ≥ 158 GiB free (weights + 8 GiB) for the
-  resident fast path; smaller cards fall back to a host mapping that streams
-  experts over PCIe at ~1 t/s. Multi-GPU placement is untested with this file.
+  seed uses the original expert numbering and is skipped); the first prompts
+  on a DGX Spark or 128 GB Mac are slow while the expert cache fills.
+* **DGX Spark is a streaming target, not a resident one**: low single-digit
+  t/s, NVMe-bound. Not run on a Spark by the author.
+* **Discrete CUDA** needs a single GPU with ≥ 158 GiB free (weights + 8 GiB)
+  for the resident fast path; smaller cards need `--ssd-streaming` (or fall
+  back to a host mapping that streams experts over PCIe at ~1 t/s). Multi-GPU
+  placement is untested with this file.
 * `general.source.revision` in the GGUF metadata carries the quantizer's
   default (the official GLM-5.3 revision); the SLIM checkpoint revision used
   is `e45b62eb3f5a22232f1e4980da255266ab933f31`.

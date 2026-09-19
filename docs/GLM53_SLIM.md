@@ -24,7 +24,7 @@ fits:
 | --- | --- |
 | 256 GB / 512 GB Mac Studio | resident, large context |
 | 192 GB Mac Studio | resident with a modest context, or SSD streaming |
-| 128 GB Mac / DGX Spark | [SSD streaming](SSD_STREAMING.md) only |
+| 128 GB Mac / DGX Spark | [SSD streaming](SSD_STREAMING.md): 19.2 GiB resident + expert cache; CUDA streaming path verified with the file, low single-digit t/s expected |
 | one 180 GB B200 | resident, about 29 GiB left for context |
 
 ## Build
