@@ -160,6 +160,32 @@ Add `--cuda --gpu-devices 0 --gpu-vram auto` on CUDA hosts.  Compare against
 the published full GLM 5.3 Q2 on the same suite and machine; absolute numbers
 depend on the generation budget.
 
+## GLM 5.3 Flash variants (glm5-next)
+
+The same treatment applies to expert-pruned **GLM 5.3 Flash** checkpoints such as
+GLM-5.3-Flash-E256o (256 of 288 routed experts, no MTP block): the Flash quantizer
+(`gguf-tools/glm53_quantize.py`) and the `glm5-next` runtime take the routed expert
+count and the MTP block count from `config.json` / the GGUF, and the single-token
+shared-expert SwiGLU kernels run on the decode stream so CUDA graph capture works
+on discrete GPUs.
+
+Build from the **FP8** original pruned with the same expert selection (do not
+re-quantize the 4-bit release):
+
+```sh
+moe-slim prune /path/to/GLM-5.3-Flash /path/to/GLM-5.3-Flash-E256o-FP8 --keep 256 --stats ... --normalize
+python -m moe_slim.calib.imatrix /path/to/GLM-5.3-Flash-E256o-FP8 --cache ... --out e256o_imatrix.dat
+python3 gguf-tools/glm53_quantize.py --hf /path/to/GLM-5.3-Flash-E256o-FP8 \
+  --tokenizer-template gguf/GLM-5.3-tokenizer.gguf --artifact q2 --model-name GLM-5.3-Flash-E256o \
+  --imatrix e256o_imatrix.dat --cuda --cuda-batch 32 --out gguf/GLM-5.3-Flash-E256o-Q2-imatrix.gguf
+```
+
+Result: 78.9 GiB (IQ2_XXS gate/up, Q2_K down, Q8_0 elsewhere) against 90 GiB for the
+published 288-expert Flash Q2 — a DGX Spark or a 128 GB Mac target (`make cuda-spark` /
+`make`). DwarfStar's imatrix collector is Metal-only; `moe_slim.calib.imatrix` produces the
+same statistics on CUDA in the legacy `.dat` format. Measured on one B200: 38 t/s decode.
+Startup prints `ds4: GLM 5.3 Flash variant: 256 routed experts, 45 blocks, 0 MTP block(s)`.
+
 ## Model card and user guide
 
 `GLM-5.3-SLIM-E192-GGUF/README.md` (model card) and `RUNNING.md` (memory
@@ -185,7 +211,10 @@ GGUF; they are the user-facing counterpart of this page.
   original shape; discrete-CUDA default for the GLM memory guard reserve.
 * `ds4_cuda.cu`: IQ2_XXS down projections in `routed_moe_launch` (mmq tier
   for prefill, mmvq kernels for decode), `n_total_expert` instead of a
-  literal 256 in the GLM Q2_K path, and the resident model copy for single
-  discrete GPUs in `ds4_gpu_register_model_map_no_copy`.
+  literal 256 in the GLM Q2_K path, the resident model copy for single
+  discrete GPUs in `ds4_gpu_register_model_map_no_copy`, and the GLM 5.3
+  Flash shared-expert SwiGLU kernels on the decode stream.
+* `gguf-tools/glm53_quantize.py` + `ds4.c` `config_validate_glm53_model`:
+  expert-pruned GLM 5.3 Flash (glm5-next) layouts.
 
 The official GLM 5.2 / 5.3 GGUFs keep working unchanged.
