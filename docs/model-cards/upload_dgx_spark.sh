@@ -1,15 +1,15 @@
 #!/bin/bash
 # Upload the two DGX Spark GGUF releases to Hugging Face under the `autotrust` org as PRIVATE repos.
-#   autotrust/GLM-5.3-Flash-GGUF-DGX-Spark   <- /root/glm-5.3-gguf/glm-5.3-flash-e256-q2   (79 GiB)
-#   autotrust/GLM-5.3-GGUF-DGX-Spark         <- /root/glm-5.3-gguf/GLM-5.3-SLIM-E192-GGUF  (150 GiB)
+#   autotrust/GLM-5.3-Flash-GGUF-DGX-Spark   <- /root/glm-5.3-gguf/GLM-5.3-Flash-GGUF-DGX-Spark  (79 GiB)
+#   autotrust/GLM-5.3-GGUF-DGX-Spark         <- /root/glm-5.3-gguf/GLM-5.3-GGUF-DGX-Spark        (150 GiB)
 # Uses `hf upload-large-folder` (resumable, multi-part, parallel); re-run the script to resume.
 # Usage: ./upload_dgx_spark.sh [flash|glm|all]   (default: all)
 set -euo pipefail
 ORG=autotrust
 FLASH_REPO=$ORG/GLM-5.3-Flash-GGUF-DGX-Spark
 GLM_REPO=$ORG/GLM-5.3-GGUF-DGX-Spark
-FLASH_DIR=/root/glm-5.3-gguf/glm-5.3-flash-e256-q2
-GLM_DIR=/root/glm-5.3-gguf/GLM-5.3-SLIM-E192-GGUF
+FLASH_DIR=/root/glm-5.3-gguf/GLM-5.3-Flash-GGUF-DGX-Spark
+GLM_DIR=/root/glm-5.3-gguf/GLM-5.3-GGUF-DGX-Spark
 WORKERS=${WORKERS:-4}
 WHAT=${1:-all}
 

@@ -18,14 +18,14 @@ tags:
 - iq2_xxs
 ---
 
-# GLM-5.3-Flash-E256 Q2 — GLM 5.3 Flash for the DGX Spark, with llama.cpp
+# GLM-5.3-Flash-GGUF-DGX-Spark — GLM 5.3 Flash for the DGX Spark, with llama.cpp
 
 **The GLM 5.3 Flash you can keep resident on a 128 GB DGX Spark with room to spare: 79.1 GiB
 instead of the stock 90 GiB Q2, 32 of 288 routed experts removed per layer, everything else
 untouched. Runs in llama.cpp (`glm5-next`), so you get the OpenAI-compatible `llama-server`,
 continuous batching, tool calling and `reasoning_content` on the Spark.**
 
-| | Stock GLM-5.3-Flash Q2 GGUF | **GLM-5.3-Flash-E256 Q2** |
+| | Stock GLM-5.3-Flash Q2 GGUF | **This file (`GLM-5.3-Flash-Q2-DGX-Spark.gguf`)** |
 |---|---|---|
 | Size | 90 GiB | **79.1 GiB** |
 | Routed experts per layer (active per token) | 288 (8) | **256 (8)** |
@@ -36,6 +36,15 @@ continuous batching, tool calling and `reasoning_content` on the Spark.**
 
 The expert selection was calibrated on a bilingual code / agent / science / maths mix; attention
 (KDA + DSA), dense layers, shared experts, router, tokenizer and chat template are unchanged.
+
+## Download
+
+```sh
+hf download autotrust/GLM-5.3-Flash-GGUF-DGX-Spark --local-dir ./GLM-5.3-Flash-GGUF-DGX-Spark
+```
+
+(private repository — `hf auth login` with an account in the `autotrust` org first). Files:
+`GLM-5.3-Flash-Q2-DGX-Spark.gguf` (79.1 GiB) and its `.sha256`.
 
 ## DGX Spark quick start
 
@@ -50,11 +59,11 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121a-real     # GB10
 cmake --build build --config Release -j
 
 # OpenAI-compatible API on :8080, 4 sessions x 16K, continuous batching
-./build/bin/llama-server -m glm-5.3-flash-e256-q2.gguf -ngl 99 -fa on \
+./build/bin/llama-server -m GLM-5.3-Flash-Q2-DGX-Spark.gguf -ngl 99 -fa on \
     -c 65536 -np 4 --cont-batching --host 0.0.0.0 --port 8080
 
 # single long-context chat
-./build/bin/llama-cli -m glm-5.3-flash-e256-q2.gguf -ngl 99 -fa on -c 65536
+./build/bin/llama-cli -m GLM-5.3-Flash-Q2-DGX-Spark.gguf -ngl 99 -fa on -c 65536
 ```
 
 * Keep the file on the internal NVMe; the first load reads 79 GiB. Stop other GPU work first.
@@ -97,8 +106,8 @@ GLM-5.3-SLIM-E192 on the same cases:
 
 | 2-bit GGUF | Passed | Wrong | Out of budget |
 |---|---:|---:|---:|
-| **GLM-5.3-Flash-E256 Q2 (this file, 79 GiB)** | **35 / 40** | 3 | 2 |
-| GLM-5.3-SLIM-E192 IQ2_XXS (150 GiB) | 30 / 40 | 1 | 9 |
+| **GLM-5.3-Flash-Q2-DGX-Spark (this file, 79 GiB; 256 experts)** | **35 / 40** | 3 | 2 |
+| GLM-5.3-Q2-DGX-Spark (the 744B build, 150 GiB; [autotrust/GLM-5.3-GGUF-DGX-Spark](https://huggingface.co/autotrust/GLM-5.3-GGUF-DGX-Spark)) | 30 / 40 | 1 | 9 |
 
 An imatrix-guided build of the same layout scored 31 / 40 with twice the reasoning tokens, so this
 weight-energy-importance build is the one published. Qualitative checks: correct bilingual
@@ -123,7 +132,7 @@ model (no vision projector).
 
 | File | Bytes | SHA-256 |
 |---|---:|---|
-| `glm-5.3-flash-e256-q2.gguf` | 84,929,449,952 | `44ef6ae232e4928803e6b485e165ec3731bebb49fd62ec3e2f4200730295d83a` |
+| `GLM-5.3-Flash-Q2-DGX-Spark.gguf` | 84,929,449,952 | `44ef6ae232e4928803e6b485e165ec3731bebb49fd62ec3e2f4200730295d83a` |
 
 ## Limitations
 
