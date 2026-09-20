@@ -25,7 +25,7 @@ instead of the stock 90 GiB Q2, 32 of 288 routed experts removed per layer, ever
 untouched. Runs in llama.cpp (`glm5-next`), so you get the OpenAI-compatible `llama-server`,
 continuous batching, tool calling and `reasoning_content` on the Spark.**
 
-| | Stock GLM-5.3-Flash Q2 GGUF | **This file (`GLM-5.3-Flash-Q2-DGX-Spark.gguf`)** |
+| | Stock GLM-5.3-Flash Q2 GGUF | **This model (`GLM-5.3-Flash-Q2-DGX-Spark-*.gguf`)** |
 |---|---|---|
 | Size | 90 GiB | **79.1 GiB** |
 | Routed experts per layer (active per token) | 288 (8) | **256 (8)** |
@@ -43,8 +43,11 @@ The expert selection was calibrated on a bilingual code / agent / science / math
 hf download autotrust/GLM-5.3-Flash-GGUF-DGX-Spark --local-dir ./GLM-5.3-Flash-GGUF-DGX-Spark
 ```
 
-(private repository — `hf auth login` with an account in the `autotrust` org first). Files:
-`GLM-5.3-Flash-Q2-DGX-Spark.gguf` (79.1 GiB) and its `.sha256`.
+(private repository — `hf auth login` with an account in the `autotrust` org first). The model
+is stored as two GGUF shards (Hugging Face's 50 GB per-file limit); llama.cpp loads them together
+when pointed at the first one:
+`GLM-5.3-Flash-Q2-DGX-Spark-00001-of-00002.gguf` (41.9 GiB) + `-00002-of-00002.gguf` (37.2 GiB),
+79.1 GiB total. Checksums in `GLM-5.3-Flash-Q2-DGX-Spark.sha256`.
 
 ## DGX Spark quick start
 
@@ -59,11 +62,11 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121a-real     # GB10
 cmake --build build --config Release -j
 
 # OpenAI-compatible API on :8080, 4 sessions x 16K, continuous batching
-./build/bin/llama-server -m GLM-5.3-Flash-Q2-DGX-Spark.gguf -ngl 99 -fa on \
+./build/bin/llama-server -m GLM-5.3-Flash-Q2-DGX-Spark-00001-of-00002.gguf -ngl 99 -fa on \
     -c 65536 -np 4 --cont-batching --host 0.0.0.0 --port 8080
 
 # single long-context chat
-./build/bin/llama-cli -m GLM-5.3-Flash-Q2-DGX-Spark.gguf -ngl 99 -fa on -c 65536
+./build/bin/llama-cli -m GLM-5.3-Flash-Q2-DGX-Spark-00001-of-00002.gguf -ngl 99 -fa on -c 65536
 ```
 
 * Keep the file on the internal NVMe; the first load reads 79 GiB. Stop other GPU work first.
@@ -128,11 +131,16 @@ hyper-connections, top-8 of 256 routed experts + 1 shared, 154 880-token vocabul
 template with tool calling. Plain llama.cpp GGUF (architecture `glm5-next`). No MTP block; text
 model (no vision projector).
 
-## File
+## Files
 
-| File | Bytes | SHA-256 |
-|---|---:|---|
-| `GLM-5.3-Flash-Q2-DGX-Spark.gguf` | 84,929,449,952 | `44ef6ae232e4928803e6b485e165ec3731bebb49fd62ec3e2f4200730295d83a` |
+| File | Bytes |
+|---|---:|
+| `GLM-5.3-Flash-Q2-DGX-Spark-00001-of-00002.gguf` | 44,984,916,000 |
+| `GLM-5.3-Flash-Q2-DGX-Spark-00002-of-00002.gguf` | 39,944,534,144 |
+| `GLM-5.3-Flash-Q2-DGX-Spark.sha256` | checksums of both shards |
+
+Total 84,929,450,144 bytes (79.1 GiB). Split with `llama-gguf-split --split-max-size 45G`; to get a
+single file: `llama-gguf-split --merge GLM-5.3-Flash-Q2-DGX-Spark-00001-of-00002.gguf out.gguf`.
 
 ## Limitations
 

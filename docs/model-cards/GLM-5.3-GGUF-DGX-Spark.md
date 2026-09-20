@@ -48,8 +48,10 @@ conversions).
 hf download autotrust/GLM-5.3-GGUF-DGX-Spark --local-dir ./GLM-5.3-GGUF-DGX-Spark
 ```
 
-(private repository — `hf auth login` with an account in the `autotrust` org first). Files:
-`GLM-5.3-Q2-DGX-Spark.gguf` (149.7 GiB; GLM-5.3-SLIM-E192 in IQ2_XXS) and its `.sha256`.
+(private repository — `hf auth login` with an account in the `autotrust` org first). The model
+is stored as four GGUF shards (Hugging Face's 50 GB per-file limit); llama.cpp loads them together
+when pointed at the first one: `GLM-5.3-Q2-DGX-Spark-00001-of-00004.gguf` … `-00004-of-00004.gguf`,
+149.7 GiB total (GLM-5.3-SLIM-E192 in IQ2_XXS). Checksums in `GLM-5.3-Q2-DGX-Spark.sha256`.
 
 ## DGX Spark quick start
 
@@ -69,7 +71,7 @@ Both machines read the weights they own, so put the file on both NVMe drives (or
 ./build/bin/rpc-server -H 0.0.0.0 -p 50052 -c
 
 # Spark A (server): local GPU + Spark B over the ConnectX link
-./build/bin/llama-server -m GLM-5.3-Q2-DGX-Spark.gguf -ngl 99 -fa on \
+./build/bin/llama-server -m GLM-5.3-Q2-DGX-Spark-00001-of-00004.gguf -ngl 99 -fa on \
     --rpc <spark-b-ip>:50052 --tensor-split 1,1 \
     -c 32768 -np 2 --cont-batching --host 0.0.0.0 --port 8080
 ```
@@ -147,16 +149,19 @@ non-uniform pruning study at equal budget found no gain over uniform expert coun
 78 layers (3 dense + 75 MoE), 64 MLA heads, DSA indexer (top-2048), top-8 of 192 routed experts +
 1 shared, 1 048 576-position metadata, GGUF v3, 1782 tensors.
 
-## File
+## Files
 
-```text
-GLM-5.3-Q2-DGX-Spark.gguf   (build name GLM-5.3-SLIM-E192-IQ2_XXS)
-size    160,760,301,792 bytes (149.7 GiB)
-sha256  0b40a1739e674a2a850000851d771ec4cb4f7662cf6152b52ef1d0984c90cf72
-```
+| File | Bytes |
+|---|---:|
+| `GLM-5.3-Q2-DGX-Spark-00001-of-00004.gguf` | 44,477,268,576 |
+| `GLM-5.3-Q2-DGX-Spark-00002-of-00004.gguf` | 44,708,574,752 |
+| `GLM-5.3-Q2-DGX-Spark-00003-of-00004.gguf` | 44,708,574,752 |
+| `GLM-5.3-Q2-DGX-Spark-00004-of-00004.gguf` | 26,865,884,128 |
+| `GLM-5.3-Q2-DGX-Spark.sha256` | checksums of the four shards |
 
-(The header stores `context_length` as u32 as llama.cpp requires; weights are identical to the
-first release of this file.)
+Total 160,760,302,208 bytes (149.7 GiB); build name GLM-5.3-SLIM-E192-IQ2_XXS. Split with
+`llama-gguf-split --split-max-size 45G`; merge back with `llama-gguf-split --merge` if a single file
+is wanted. On a two-Spark RPC setup every machine needs all four shards on local storage.
 
 ## Limitations
 
