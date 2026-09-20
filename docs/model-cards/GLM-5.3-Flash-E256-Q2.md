@@ -10,55 +10,72 @@ language:
 tags:
 - gguf
 - llama.cpp
+- dgx-spark
+- gb10
 - glm5-next
 - moe
 - expert-pruned
 - iq2_xxs
-- dgx-spark
 ---
 
-# GLM-5.3-Flash-E256 Q2 — 78.9 GiB GGUF for llama.cpp
+# GLM-5.3-Flash-E256 Q2 — GLM 5.3 Flash for the DGX Spark, with llama.cpp
 
-**GLM-5.3-Flash with 256 of its 288 routed experts, routed experts in 2-bit (IQ2_XXS gate/up,
-Q2_K down), everything else 8-bit. One file, 79.1 GiB, runs in `llama.cpp` — 54 t/s single-stream
-and 250 t/s with 32 parallel requests on one B200; fits a 128 GB DGX Spark or Mac with ~40 GiB to
-spare for context.**
+**The GLM 5.3 Flash you can keep resident on a 128 GB DGX Spark with room to spare: 79.1 GiB
+instead of the stock 90 GiB Q2, 32 of 288 routed experts removed per layer, everything else
+untouched. Runs in llama.cpp (`glm5-next`), so you get the OpenAI-compatible `llama-server`,
+continuous batching, tool calling and `reasoning_content` on the Spark.**
 
-The 32 least-used experts per layer were removed after calibration on a bilingual code / agent /
-science / maths mix (measured at 4-bit under vLLM: HumanEval 97.6, C-Eval 89.4, GPQA-Diamond 77.3,
-AIME25 74.2, MMMU 76.1, BFCL Live 80.5). Attention (KDA + DSA), dense layers, shared experts,
-router, tokenizer and chat template are unchanged.
+| | Stock GLM-5.3-Flash Q2 GGUF | **GLM-5.3-Flash-E256 Q2** |
+|---|---|---|
+| Size | 90 GiB | **79.1 GiB** |
+| Routed experts per layer (active per token) | 288 (8) | **256 (8)** |
+| Free unified memory on a 128 GB Spark after weights | ~25 GiB | **~40 GiB** |
+| Context that fits comfortably on a Spark | 16–32 K | **64 K, or 4 × 16 K sessions** |
+| Decode speed | same class (identical work per token) | same class |
+| Quality (see below) | reference | 4-bit: HumanEval 97.6, C-Eval 89.4, GPQA-D 77.3; 2-bit harness A/B on par or better |
 
-## Run it with llama.cpp
+The expert selection was calibrated on a bilingual code / agent / science / maths mix; attention
+(KDA + DSA), dense layers, shared experts, router, tokenizer and chat template are unchanged.
 
-GLM-5.3-Flash (`glm5-next`) support is in llama.cpp pull request
-[#27773](https://github.com/ggml-org/llama.cpp/pull/27773) (not merged at the time of writing).
-Build that branch:
+## DGX Spark quick start
+
+GLM-5.3-Flash support is in llama.cpp pull request
+[#27773](https://github.com/ggml-org/llama.cpp/pull/27773) (`glm5-next`; not merged at the time of
+writing — once it is, plain `master` works).
 
 ```sh
 git clone https://github.com/ggml-org/llama.cpp.git && cd llama.cpp
 git fetch origin pull/27773/head:glm5next && git checkout glm5next
-cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j     # CUDA / DGX Spark
-# Apple Silicon: cmake -B build && cmake --build build --config Release -j
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121a-real     # GB10
+cmake --build build --config Release -j
 
-./build/bin/llama-server -m glm-5.3-flash-e256-q2.gguf -ngl 99 -c 65536 -np 4 --cont-batching -fa on
-./build/bin/llama-cli    -m glm-5.3-flash-e256-q2.gguf -ngl 99 -c 32768
+# OpenAI-compatible API on :8080, 4 sessions x 16K, continuous batching
+./build/bin/llama-server -m glm-5.3-flash-e256-q2.gguf -ngl 99 -fa on \
+    -c 65536 -np 4 --cont-batching --host 0.0.0.0 --port 8080
+
+# single long-context chat
+./build/bin/llama-cli -m glm-5.3-flash-e256-q2.gguf -ngl 99 -fa on -c 65536
 ```
 
-* Thinking is on by default (the GLM 5.3 template always opens `<think>`); `--reasoning-budget 0`
-  turns it off, `--reasoning-budget N` caps it, `--chat-template-kwargs '{"reasoning_effort":"low"}'`
-  selects the low/high/max effort levels of the template. The server returns the thinking part
-  separately as `reasoning_content`.
-* Serving many users: `-np 16 -c 262144` gives 16 slots of 16 K tokens; MoE decode throughput keeps
-  growing to 32 slots (table below).
-* The file is a plain llama.cpp GGUF (architecture `glm5-next`, standard tensor names, `context_length`
-  u32, small mHC/indexer tensors in F32). Two harmless quirks of the branch at the time of writing are
-  patched in `llamacpp-pr27773-glm5next-lenient.patch` (tolerate u64 metadata; return unparsed
-  replies verbatim instead of HTTP 500 when `max_tokens` cuts a reply mid-UTF-8-character).
-* Vision: this is the text model; no `mmproj` is provided yet for the Flash vision encoder under
-  llama.cpp.
+* Keep the file on the internal NVMe; the first load reads 79 GiB. Stop other GPU work first.
+* Memory on the Spark: 79.1 GiB weights + ~1 GiB per 16 K tokens of context (KDA layers keep a
+  constant state; the DSA layers use a compact cache) + a few GiB of compute buffers. `-c 65536`
+  leaves ~30 GiB free; `-np 4 -c 65536` (4 × 16 K) is a good multi-user setting.
+* Thinking is on by default (the GLM template opens `<think>`). `--reasoning-budget 0` disables it,
+  `--reasoning-budget 4096` caps it, `--chat-template-kwargs '{"reasoning_effort":"low"}'` selects
+  the template's low / high / max effort. The server returns thinking separately as
+  `reasoning_content`; tool calls come back as OpenAI `tool_calls`.
+* Expected decode speed on a Spark: the same class as the stock Flash Q2 — the per-token work is
+  identical (8 experts + the same 8-bit attention). Decode is bound by the 273 GB/s LPDDR5X (about
+  11 GB of weights per token), so roughly 15–20 t/s single-stream; batching several sessions gives
+  more aggregate throughput. Not measured by the author on a Spark; see the B200 table below for
+  relative numbers.
+* Two Sparks (ConnectX link) are not needed for this file; it is a single-Spark model.
 
-## Speed (llama.cpp, CUDA, one B200, model resident)
+Also runs on: 128 GB Apple Silicon (`cmake -B build` without CUDA), discrete NVIDIA GPUs with
+≥ 90 GB, or partially offloaded (`-ngl N`) on smaller cards.
+
+## Speed reference (llama.cpp, CUDA, one B200, model resident)
 
 | | tokens/s |
 |---|---:|
@@ -66,25 +83,26 @@ cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j     # C
 | Generation, 1 sequence | 54 |
 | Generation, 4 / 8 / 16 / 32 parallel sequences (aggregate) | 130 / 170 / 207 / 253 |
 
-(`llama-bench` and `llama-batched-bench`, 256-token prompts, 128 generated tokens each, flash
-attention on.) Memory: 79.1 GiB weights + ~1 GiB per 16 K tokens of context; the DSA/KDA layers keep
-the KV cache small.
-
-**DGX Spark (128 GB):** the same build (`-DGGML_CUDA=ON`, sm_121) runs the file resident in unified
-memory with ~40 GiB left; per-token work is identical to the stock 288-expert Flash Q2, so expect the
-same speed class (roughly 15–20 t/s decode) — not measured by the author.
+(`llama-bench`, `llama-batched-bench`; 256-token prompts, 128 generated tokens, flash attention.)
 
 ## Quality
 
-Same weights, DwarfStar's `ds4-eval` harness (GPQA Diamond, SuperGPQA, AIME 2025 interleaved; thinking
-on, 16 000-token budget, greedy), first 40 core cases: **35 / 40** (3 wrong, 2 out of budget). The 4-bit
-model with the same expert selection scored, under vLLM: HumanEval 97.6, C-Eval 89.4, GPQA-Diamond 77.3
-(low effort), AIME 2025 74.2, MMMU 76.1, BFCL Non-Live 87.7 / Live 80.5 / multi-turn 73–75. The 2-bit
-routed experts add their own loss, mostly on the hardest reasoning. An imatrix-guided build of the
-same layout was tested head-to-head and did worse (31 / 40, twice the reasoning tokens), so this
-weight-energy-importance build is the one published.
+The 4-bit model with the same 256-expert selection, under vLLM (one B200): HumanEval 97.6,
+C-Eval 89.4, GPQA-Diamond 77.3 (low effort), AIME 2025 74.2, MMMU 76.1, BFCL Non-Live 87.7 /
+Live 80.5 / multi-turn 73–75 — the pruning itself costs little.
 
-Qualitative: correct bilingual common-sense / medical / coding answers, no Chinese–English mixing.
+This 2-bit file, on DwarfStar's `ds4-eval` harness (GPQA Diamond, SuperGPQA, AIME 2025 interleaved;
+thinking on, 16 000-token budget, greedy), first 40 core cases, compared with the 2-bit 744B
+GLM-5.3-SLIM-E192 on the same cases:
+
+| 2-bit GGUF | Passed | Wrong | Out of budget |
+|---|---:|---:|---:|
+| **GLM-5.3-Flash-E256 Q2 (this file, 79 GiB)** | **35 / 40** | 3 | 2 |
+| GLM-5.3-SLIM-E192 IQ2_XXS (150 GiB) | 30 / 40 | 1 | 9 |
+
+An imatrix-guided build of the same layout scored 31 / 40 with twice the reasoning tokens, so this
+weight-energy-importance build is the one published. Qualitative checks: correct bilingual
+common-sense, medical and coding answers; no Chinese–English mixing.
 
 ## What is in the file
 
@@ -98,7 +116,8 @@ Qualitative: correct bilingual common-sense / medical / coding answers, no Chine
 
 45 layers (3 dense + 42 MoE), KDA linear attention with DSA every fourth layer (k-pool indexer),
 hyper-connections, top-8 of 256 routed experts + 1 shared, 154 880-token vocabulary, GLM 5.3 chat
-template with tool calling. No MTP block.
+template with tool calling. Plain llama.cpp GGUF (architecture `glm5-next`). No MTP block; text
+model (no vision projector).
 
 ## File
 
@@ -109,13 +128,14 @@ template with tool calling. No MTP block.
 ## Limitations
 
 * 2-bit routed experts on top of an 11 % expert pruning: chat, coding and agent use are the target;
-  expect a drop on the hardest maths/science reasoning versus the 4-bit vLLM deployment.
-* Needs the llama.cpp `glm5-next` branch until it is merged; the DwarfStar fork
-  [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim) can also convert the file back to
-  its own layout (`gguf-tools/glm5next_to_llamacpp.py --restore`), but llama.cpp is the recommended
-  runtime: faster, batched, mainstream.
+  expect a drop on the hardest maths/science reasoning versus the 4-bit deployment.
+* Needs the llama.cpp `glm5-next` branch until it is merged. Two quirks of that branch are patched in
+  `llamacpp-pr27773-glm5next-lenient.patch` (in the tooling repository): tolerate u64 metadata, and
+  return a reply verbatim instead of HTTP 500 when `max_tokens` cuts it mid-UTF-8-character. Neither
+  is required to run the model.
 * No MTP head, no vision projector in this file.
 
-License: MIT (base model). Credits: Z.AI (GLM-5.3-Flash); the llama.cpp / ggml authors and the
-`glm5-next` PR authors; DwarfStar (2-bit recipe and quantizer);
-[MOE-SLIM](https://github.com/yuhai-china/MOE-SLIM) (expert pruning); yuhai-china (this build).
+License: MIT (base model). Credits: Z.AI (GLM-5.3-Flash); llama.cpp / ggml and the `glm5-next` PR
+authors; DwarfStar (2-bit recipe and quantizer); [MOE-SLIM](https://github.com/yuhai-china/MOE-SLIM)
+(expert pruning); tooling: [ds4-glm-slim](https://github.com/yuhai-china/ds4-glm-slim); yuhai-china
+(this build).

@@ -12,6 +12,7 @@ pipeline_tag: text-generation
 tags:
 - gguf
 - llama.cpp
+- dgx-spark
 - moe
 - expert-pruning
 - iq2_xxs
@@ -19,137 +20,71 @@ tags:
 - glm-dsa
 ---
 
-# GLM-5.3-SLIM-E192 — IQ2_XXS GGUF: GLM 5.3 on a single machine, with llama.cpp
+# GLM-5.3-SLIM-E192 — IQ2_XXS GGUF: the 744B GLM 5.3 for DGX Spark owners, with llama.cpp
 
-**GLM 5.3, the 744B-parameter frontier MoE, running on one GPU or one Mac.**
-Expert pruning (192 of 256 routed experts, "SLIM") took 25 % off the model;
-2-bit routed experts took the rest. The result is a **149.7 GiB** file that
-runs in **llama.cpp** (architecture `glm-dsa`, upstream) — 42 t/s single-stream
-and 177 t/s aggregate with 32 parallel requests on one 180 GB B200, or a single
-Mac Studio (256 GB; 192 GB with a small context) — hardware where the unpruned
-model needs a multi-GPU node or does not fit at all.
+**GLM 5.3, Z.AI's 744B-parameter frontier MoE, as one 149.7 GiB GGUF that llama.cpp runs
+natively (`glm-dsa`). It is 47 GiB smaller than the full GLM 5.3 Q2 because 25 % of the routed
+experts (the least-used 64 of 256 per layer) are gone — which is what makes it fit a pair of DGX
+Sparks, one 180 GB GPU, or a Mac Studio.**
 
-| GLM 5.3 form | Size | What it takes to run it |
-|---|---:|---|
-| Original FP8 (`zai-org/GLM-5.3`) | 756 GB | 8× H200/B200 or 4× B300, tensor parallel (88 GiB/GPU at TP=8: too big for 80 GB cards) |
-| Pruned FP8 (`cloudyu/GLM-5.3-SLIM-E192`) | 564 GB | 4× B200/B300 or 8× 80 GB cards |
-| Full GLM 5.3 IQ2_XXS GGUF (`antirez/glm-5.3-gguf`) | 197 GiB | 256 GB+ Mac resident; 128 GB Mac via SSD streaming; **does not fit one 180 GB GPU** |
-| **This file — SLIM IQ2_XXS GGUF** | **149.7 GiB** | **one 180 GB GPU resident (llama.cpp: 42 t/s single, 177 t/s batched); one Mac Studio resident (256 GB comfortably, 192 GB with a small context)** |
+| Where | How | What to expect |
+|---|---|---|
+| **Two DGX Sparks** (ConnectX-7 link, NVIDIA's dual-Spark setup) | llama.cpp RPC: the model is split across the two 128 GB memories (~75 GiB each), fully resident | the intended Spark configuration for this file; decode is memory-bandwidth bound (~25 GB of weights per token) |
+| One DGX Spark (128 GB) | llama.cpp mmap: only part of the 149.7 GiB stays in memory, the rest is paged from NVMe every token | works, but slow (low single-digit t/s); use GLM-5.3-Flash-E256 Q2 (79 GiB) for a single Spark |
+| One 180 GB GPU (B200 / GB200) | resident | 42 t/s single stream, 177 t/s with 32 parallel requests (measured) |
+| Mac Studio 256 GB (192 GB with a small context) | resident, Metal | same class as the full GLM 5.3 Q2 on the same Mac |
 
-The pruning is the enabler: at 2 bits the unpruned experts alone are 187 GB,
-so no single-device quantization of the original could fit a 180 GB card with
-room for a context. Pruning removes 47 GB of expert bytes at this precision
-and, per its author's A/B on the FP8 checkpoints, costs nothing measurable on
-coding, cybersecurity, tool calling and math (GPQA −3.6 pt, C-Eval −7.3 pt).
+What the file is: [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192)
+(192 of 256 routed experts; attention with MLA + DSA sparse indexer, shared experts, router,
+tokenizer and chat template identical to GLM 5.3; no MTP head) with routed experts in IQ2_XXS
+(2.06 bits/weight) and everything else in Q8_0 — the recipe of the full GLM 5.3 Q2, so per-token
+compute and memory traffic are unchanged; only the footprint drops. Standard llama.cpp `glm-dsa`
+layout (same tensor names, MLA `attn_k_b`/`attn_v_b` split and metadata as llama.cpp's own GLM 5.2/5.3
+conversions).
 
-What the file is: GLM-5.3-SLIM-E192 (attention with MLA + DSA sparse indexer,
-shared experts, router, tokenizer and chat template identical to GLM 5.3; no
-MTP head) with routed experts in IQ2_XXS (2.06 bits/weight) and everything
-else in Q8_0 — the same recipe DwarfStar publishes for the full GLM 5.3, so
-per-token compute and memory traffic are unchanged; only the footprint drops.
+## DGX Spark quick start
 
-It is a standard llama.cpp GGUF (`glm-dsa` architecture, the same tensor names,
-MLA `attn_k_b`/`attn_v_b` split and metadata as llama.cpp's own GLM 5.2/5.3
-conversions); the recommended runtime is **llama.cpp** (see below). The
-DwarfStar fork [`ds4-glm-slim`](https://github.com/yuhai-china/ds4-glm-slim)
-also loads it.
-
-## At a glance
-
-| | |
-|---|---|
-| File | `GLM-5.3-SLIM-E192-IQ2_XXS.gguf` |
-| Size | 160,760,301,792 bytes (149.7 GiB) |
-| GGUF | v3, architecture `glm-dsa`, 1782 tensors |
-| Parameters | ≈563 B total, ≈40 B active per token (8 of 192 routed experts + 1 shared) |
-| Layers | 78 (3 dense + 75 MoE), no MTP block |
-| Context | 1,048,576 positions in metadata; use what your memory allows |
-| Routed experts | IQ2_XXS, 2.0625 bits/weight, weight-energy importance (no imatrix) |
-| Everything else | Q8_0 (attention, shared experts, dense FFN, embeddings, output head); F32 norms/routers/indexer projections |
-| Runtime | **llama.cpp** (upstream, CUDA / Metal / CPU); DwarfStar fork `ds4-glm-slim` also works |
-| Fits | **one** 180 GB GPU (B200/GB200) resident; **one** Mac Studio 256 GB resident, 192 GB resident with a small context. Not a 128 GB machine target (see GLM-5.3-SLIM-E160 / Flash-E256 for those) |
-| Source checkpoint | [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192) (FP8), revision `e45b62eb` |
-| License | GLM-5.3 (same as the base model) |
-
-## What is in the file
-
-| Role | Tensors | Type | Bytes |
-|---|---|---:|---:|
-| Routed experts gate / up / down (75 layers × 192 experts) | 225 | IQ2_XXS | 140.14 GB |
-| Attention (MLA q_a/q_b/kv_a/kv_b/o, DSA indexer q_b/k) | 78 layers | Q8_0 | 14.50 GB |
-| Shared experts gate / up / down | 75 layers | Q8_0 | 3.01 GB |
-| Dense FFN (layers 0–2) | 3 layers | Q8_0 | 0.72 GB |
-| Token embedding, output head | 2 | Q8_0 | 2.02 GB |
-| Norms, routers, bias, indexer weights_proj | — | F32 | 0.42 GB |
-
-Per-token decode reads the same amount of data as the full GLM 5.3 Q2 (8
-routed experts per layer either way), so **speed per token is the same as the
-197 GiB file; the gain is memory**.
-
-## Run it with llama.cpp
-
-`glm-dsa` (GLM 5.2 / 5.3 with the DSA indexer) is supported by upstream llama.cpp; nothing
-special is needed:
+`glm-dsa` is supported by upstream llama.cpp. Build on each Spark:
 
 ```sh
 git clone https://github.com/ggml-org/llama.cpp.git && cd llama.cpp
-cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j      # NVIDIA
-# Apple Silicon: cmake -B build && cmake --build build --config Release -j
-
-# OpenAI-compatible server, 8 slots x 16K context, continuous batching
-./build/bin/llama-server -m GLM-5.3-SLIM-E192-IQ2_XXS.gguf -ngl 99 -c 131072 -np 8 --cont-batching -fa on
-# interactive
-./build/bin/llama-cli -m GLM-5.3-SLIM-E192-IQ2_XXS.gguf -ngl 99 -c 32768
+cmake -B build -DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_CUDA_ARCHITECTURES=121a-real
+cmake --build build --config Release -j
 ```
 
-Thinking is on by default (the template opens `<think>`); `--reasoning-budget 0` disables it,
-`--chat-template-kwargs '{"reasoning_effort":"low"}'` selects the effort level, and the server
-returns reasoning separately as `reasoning_content`. Tool calling works through the GLM template.
+**Two Sparks (resident):** start the RPC worker on the second machine, then the server on the first.
+Both machines read the weights they own, so put the file on both NVMe drives (or on shared storage).
 
-Memory on a 180 GB card: 149.7 GiB weights + ~1.2 GiB per 16 K tokens of context (compressed
-MLA/DSA cache); `-np 8 -c 131072` fits. On a 192 GB Mac keep the context small; on 256 GB it is
-comfortable.
+```sh
+# Spark B (worker)
+./build/bin/rpc-server -H 0.0.0.0 -p 50052 -c
 
-One optional patch (`docs/llamacpp/llamacpp-master-glm-dsa-lenient.patch` in the fork) makes
-`llama-server` return a reply verbatim instead of HTTP 500 when `max_tokens` cuts it in the middle
-of a multi-byte character; it is not needed to run the model.
+# Spark A (server): local GPU + Spark B over the ConnectX link
+./build/bin/llama-server -m GLM-5.3-SLIM-E192-IQ2_XXS.gguf -ngl 99 -fa on \
+    --rpc <spark-b-ip>:50052 --tensor-split 1,1 \
+    -c 32768 -np 2 --cont-batching --host 0.0.0.0 --port 8080
+```
 
-## Quality
+`--tensor-split 1,1` places about half of the 78 layers on each Spark (~75 GiB of weights each,
+leaving ~40 GiB per machine for context and buffers). Only activations cross the link per token, so
+the 200 GbE ConnectX connection is not the bottleneck. This configuration is llama.cpp's standard
+RPC path; the author has not run it on Spark hardware — please report numbers.
 
-The pruned FP8 base ([model card](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192))
-was measured against GLM-5.3 by its author: coding, cybersecurity, tool
-calling and math within run-to-run noise; GPQA-Diamond −3.6 pt; C-Eval −7.3 pt
-(the deliberate trade-off). The 2-bit routed experts of this file add their
-own loss on top. Held-out perplexity of the FP8 base vs. the original: code
-+1.0 %, English chat +4.7 %, Chinese +7.3 %.
+**One Spark (paged):** the same `llama-server` command without `--rpc`. llama.cpp maps the file and
+the GB10 pages weights in from NVMe as experts are needed; expect low single-digit tokens/s. For a
+single Spark the resident choice is
+[GLM-5.3-Flash-E256 Q2](https://huggingface.co/cloudyu/glm-5.3-flash-e256-q2-gguf) (79 GiB).
 
-This GGUF, DwarfStar's `ds4-eval` harness on the same weights (GPQA Diamond,
-SuperGPQA, AIME 2025, COMPSEC; thinking on, default budgets), one B200:
+**Everywhere:** thinking is on by default (the template opens `<think>`); `--reasoning-budget 0`
+disables it, `--chat-template-kwargs '{"reasoning_effort":"low"}'` selects the template's effort
+level; the server returns reasoning separately as `reasoning_content` and tool calls as OpenAI
+`tool_calls`. Sample with `--temp 0.7 --min-p 0.05` (or a reasoning budget) rather than pure greedy:
+at 2 bits the model occasionally loops in very long greedy chains of thought.
 
-| Set | Passed | Wrong | Out of budget |
-|---|---:|---:|---:|
-| GPQA Diamond (25) | 12 | 0 | 13 |
-| SuperGPQA (25) | 17 | 4 | 4 |
-| AIME 2025 (25) | 14 | 1 | 10 |
-| COMPSEC cybersecurity (17) | 15 | 2 | 0 |
-| **core total (92)** | **58** | 7 | 27 |
+Memory: 149.7 GiB weights + ~1.2 GiB per 16 K tokens of context (compressed MLA/DSA cache) + compute
+buffers. On a 180 GB GPU `-np 8 -c 131072` fits; on a 192 GB Mac keep the context small.
 
-Runtime 14 h 28 min at ~11 t/s. Most misses are budget exhaustions on the
-hardest GPQA/AIME items (the model keeps reasoning past the 16 000-token cap),
-not wrong answers; only 3 of the 27 were repetition loops.
-
-`ds4-eval` scores are integration checks, not leaderboard numbers; compare
-against the published full GLM 5.3 Q2 run on the same machine and suite.
-
-A per-layer non-uniform pruning study on this checkpoint (mass-greedy and
-layer-sensitivity allocations at the same budget) found no gain over uniform
-expert counts; the uniform 160-expert sibling GLM-5.3-SLIM-E160 (128 GiB,
-held-out PPL +3.6 %) is the smaller option.
-
-## Speed
-
-llama.cpp, CUDA, one NVIDIA B200 (180 GB), model resident, flash attention on
-(`llama-bench` / `llama-batched-bench`, 256-token prompts, 128 generated tokens):
+## Speed reference (llama.cpp, CUDA, one B200, model resident)
 
 | | tokens/s |
 |---|---:|
@@ -157,61 +92,78 @@ llama.cpp, CUDA, one NVIDIA B200 (180 GB), model resident, flash attention on
 | Generation, 1 sequence | 42 |
 | Generation, 4 / 8 / 16 / 32 parallel sequences (aggregate) | 96 / 120 / 154 / 177 |
 
-Per-token work is the same as the full GLM 5.3 Q2 (8 routed experts per layer either way), so the
-gain over the 197 GiB file is memory, not speed. Metal figures for the full GLM 5.3 Q2 on the same
-class of Mac apply directly.
+(`llama-bench` / `llama-batched-bench`, 256-token prompts, 128 generated tokens, flash attention.)
+Per-token work equals the full GLM 5.3 Q2 (8 routed experts per layer either way).
 
-## How it was built
+## Quality
 
-```sh
-python3 gguf-tools/glm53_full_quantize.py \
-  --hf GLM-5.3-SLIM-E192 \
-  --tokenizer-template GLM-5.3-UD-IQ2_XXS_RoutedIQ2XXS_blk78Q2K.gguf \
-  --model-name GLM-5.3-SLIM-E192 \
-  --repo-url https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192 \
-  --cuda --cuda-batch 32 \
-  --out GLM-5.3-SLIM-E192-IQ2_XXS.gguf
+**The pruned FP8 base vs the original GLM-5.3** (its author's A/B under vLLM): HumanEval 95.1 → 95.1,
+CyberMetric 88.0 → 87.7, BFCL live 69.6 → 69.4, BFCL multi-turn 73.0 → 72.5, AIME −2.5 pt;
+GPQA-Diamond 86.9 → 83.3 (−3.6); C-Eval 92.0 → 84.7 (−7.3, the deliberate trade-off). Held-out
+perplexity vs the original: code +1.0 %, English chat +4.7 %, Chinese +7.3 %.
+
+**This 2-bit file**, DwarfStar's `ds4-eval` harness on the same weights (GPQA Diamond, SuperGPQA,
+AIME 2025, COMPSEC cybersecurity; thinking on, 16 000-token budget, greedy), one B200:
+
+| Set | Passed | Wrong | Out of budget |
+|---|---:|---:|---:|
+| GPQA Diamond (25) | 12 | 0 | 13 |
+| SuperGPQA (25) | 17 | 4 | 4 |
+| AIME 2025 (25) | 14 | 1 | 10 |
+| COMPSEC (17) | 15 | 2 | 0 |
+| **core total (92)** | **58** | 7 | 27 |
+
+Read it as: when it answers, it is almost always right (7 wrong in 92), but at 2 bits the long
+reasoning chains often do not close within the budget — which is why non-greedy sampling or a
+reasoning budget is recommended above. On the first 40 of these cases the smaller
+GLM-5.3-Flash-E256 Q2 scored 35 / 40 (3 wrong, 2 out of budget) against 30 / 40 here (1 wrong, 9 out
+of budget). Where this model keeps a clear edge over Flash is language modelling of agent/SWE
+trajectories and code (held-out PPL 6.2 vs 12.4 on agent traces, 3.1 vs 4.6 on SWE traces,
+2.96 vs 3.17 on code); Flash is better on general and Chinese text.
+
+Companion builds: GLM-5.3-SLIM-E160 (128 GiB, held-out PPL +3.6 % vs this file); a per-layer
+non-uniform pruning study at equal budget found no gain over uniform expert counts.
+
+## What is in the file
+
+| Role | Tensors | Type | Bytes |
+|---|---|---:|---:|
+| Routed experts gate / up / down (75 layers × 192 experts) | 225 | IQ2_XXS | 140.1 GB |
+| Attention (MLA q_a/q_b/kv_a/k_b/v_b/o, DSA indexer) | 78 layers | Q8_0 | 14.5 GB |
+| Shared experts gate / up / down | 75 layers | Q8_0 | 3.0 GB |
+| Dense FFN (layers 0–2) | 3 layers | Q8_0 | 0.7 GB |
+| Token embedding, output head | 2 | Q8_0 | 2.0 GB |
+| Norms, routers, bias, indexer weights_proj | — | F32 | 0.4 GB |
+
+78 layers (3 dense + 75 MoE), 64 MLA heads, DSA indexer (top-2048), top-8 of 192 routed experts +
+1 shared, 1 048 576-position metadata, GGUF v3, 1782 tensors.
+
+## File
+
+```text
+GLM-5.3-SLIM-E192-IQ2_XXS.gguf
+size    160,760,301,792 bytes (149.7 GiB)
+sha256  0b40a1739e674a2a850000851d771ec4cb4f7662cf6152b52ef1d0984c90cf72
 ```
 
-* Source: the FP8 (block 128) safetensors of `cloudyu/GLM-5.3-SLIM-E192`,
-  dequantized exactly; tokenizer/chat template taken from the checkpoint,
-  validated against the published full GLM 5.3 GGUF.
-* Routed experts quantized on a B200 with the fork's PyTorch/CUDA port of
-  DwarfStar's IQ2_XXS quantizer (`gguf-tools/iq2xxs_cuda.py`), which is
-  byte-identical to the C implementation for the same importance vector
-  (verified on 296,848 real blocks). 43,200 expert matrices in 29 minutes.
-* Importance: DwarfStar's fallback `importance[column] = Σ row[column]²`
-  (no activation imatrix).
-* Attention, shared experts, dense FFN, embeddings and output head: Q8_0 via
-  the C quantizer, as in the published GLM 5.3 Q2.
+(The header stores `context_length` as u32 as llama.cpp requires; weights are identical to the
+first release of this file.)
 
 ## Limitations
 
-* **2-bit routed experts.** Expect a measurable drop versus the FP8 checkpoint
-  on knowledge-heavy and Chinese-exam tasks; coding and agent use are the
-  intended workloads.
-* **No MTP head**, no imatrix (weight-energy importance; an imatrix A/B on the
-  Flash sibling did not favour imatrix at this bit width).
-* **192 GB Macs** are borderline: 149.7 GiB weights + graph + context leaves
-  little for macOS; keep the context small.
-* **128 GB machines (DGX Spark, 128 GB Mac)** cannot hold the file; use
-  GLM-5.3-Flash-E256 Q2 (78.9 GiB) or the smaller SLIM builds instead.
-* `general.source.revision` in the GGUF metadata carries the quantizer's
-  default (the official GLM-5.3 revision); the SLIM checkpoint revision used
-  is `e45b62eb3f5a22232f1e4980da255266ab933f31`.
-
-## Verify the download
-
-```text
-size    160760301792 bytes
-sha256  0b40a1739e674a2a850000851d771ec4cb4f7662cf6152b52ef1d0984c90cf72   (header: context_length stored as u32 for llama.cpp; weights unchanged)
-```
+* **2-bit routed experts.** A measurable drop versus the FP8 checkpoint on knowledge-heavy and
+  Chinese-exam tasks; coding, agent and cybersecurity use are the intended workloads.
+* **Long greedy reasoning can fail to converge**; use sampling or `--reasoning-budget`.
+* **One 128 GB machine cannot hold it resident** — two Sparks (RPC), a 180 GB GPU or a 192–256 GB
+  Mac; for a single Spark use GLM-5.3-Flash-E256 Q2.
+* No MTP head, no imatrix.
+* `general.source.revision` in the metadata carries the quantizer's default (the official GLM-5.3
+  revision); the SLIM checkpoint revision used is `e45b62eb3f5a22232f1e4980da255266ab933f31`.
 
 ## License and credits
 
-* Weights: GLM-5.3 License (Z.AI), including the Model-as-a-Service clause;
-  this file is a derivative of `zai-org/GLM-5.3` via `cloudyu/GLM-5.3-SLIM-E192`.
-* Expert pruning: cloudyu (GLM-5.3-SLIM-E192).
-* Inference engine and quant recipe: Salvatore Sanfilippo and the DwarfStar
-  contributors (`antirez/ds4`), building on llama.cpp / GGML.
-* Fork, CUDA quantizer and this build: yuhai-china — https://github.com/yuhai-china/ds4-glm-slim.
+* Weights: GLM-5.3 License (Z.AI), including the Model-as-a-Service clause; derivative of
+  `zai-org/GLM-5.3` via `cloudyu/GLM-5.3-SLIM-E192`.
+* Expert pruning: cloudyu (GLM-5.3-SLIM-E192). Quantization recipe and IQ2_XXS quantizer:
+  DwarfStar (`antirez/ds4`), on llama.cpp / GGML. Tooling and this build: yuhai-china —
+  https://github.com/yuhai-china/ds4-glm-slim.
