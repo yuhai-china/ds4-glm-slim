@@ -3,7 +3,7 @@ license: other
 license_name: glm-5.3
 license_link: https://huggingface.co/zai-org/GLM-5.3/blob/main/LICENSE
 base_model:
-- cloudyu/GLM-5.3-SLIM-E192
+- autotrust/GLM-5.3-SLIM-E192
 - zai-org/GLM-5.3
 language:
 - en
@@ -34,7 +34,7 @@ Sparks, one 180 GB GPU, or a Mac Studio.**
 | One 180 GB GPU (B200 / GB200) | resident | 42 t/s single stream, 177 t/s with 32 parallel requests (measured) |
 | Mac Studio 256 GB (192 GB with a small context) | resident, Metal | same class as the full GLM 5.3 Q2 on the same Mac |
 
-What the file is: [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192)
+What the file is: [`autotrust/GLM-5.3-SLIM-E192`](https://huggingface.co/autotrust/GLM-5.3-SLIM-E192)
 (192 of 256 routed experts; attention with MLA + DSA sparse indexer, shared experts, router,
 tokenizer and chat template identical to GLM 5.3; no MTP head) with routed experts in IQ2_XXS
 (2.06 bits/weight) and everything else in Q8_0 — the recipe of the full GLM 5.3 Q2, so per-token
@@ -73,7 +73,7 @@ RPC path; the author has not run it on Spark hardware — please report numbers.
 **One Spark (paged):** the same `llama-server` command without `--rpc`. llama.cpp maps the file and
 the GB10 pages weights in from NVMe as experts are needed; expect low single-digit tokens/s. For a
 single Spark the resident choice is
-[GLM-5.3-Flash-E256 Q2](https://huggingface.co/cloudyu/glm-5.3-flash-e256-q2-gguf) (79 GiB).
+[GLM-5.3-Flash-E256 Q2](https://huggingface.co/autotrust/GLM-5.3-Flash-GGUF-DGX-Spark) (79 GiB).
 
 **Everywhere:** thinking is on by default (the template opens `<think>`); `--reasoning-budget 0`
 disables it, `--chat-template-kwargs '{"reasoning_effort":"low"}'` selects the template's effort
@@ -163,7 +163,7 @@ first release of this file.)
 ## License and credits
 
 * Weights: GLM-5.3 License (Z.AI), including the Model-as-a-Service clause; derivative of
-  `zai-org/GLM-5.3` via `cloudyu/GLM-5.3-SLIM-E192`.
-* Expert pruning: cloudyu (GLM-5.3-SLIM-E192). Quantization recipe and IQ2_XXS quantizer:
+  `zai-org/GLM-5.3` via `autotrust/GLM-5.3-SLIM-E192`.
+* Expert pruning: autotrust (GLM-5.3-SLIM-E192). Quantization recipe and IQ2_XXS quantizer:
   DwarfStar (`antirez/ds4`), on llama.cpp / GGML. Tooling and this build: yuhai-china —
   https://github.com/yuhai-china/ds4-glm-slim.

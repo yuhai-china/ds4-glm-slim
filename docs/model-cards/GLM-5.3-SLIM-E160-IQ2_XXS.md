@@ -3,7 +3,7 @@ license: other
 license_name: glm-5.3
 license_link: https://huggingface.co/zai-org/GLM-5.3/blob/main/LICENSE
 base_model:
-- cloudyu/GLM-5.3-SLIM-E192
+- autotrust/GLM-5.3-SLIM-E192
 - zai-org/GLM-5.3
 language:
 - en
@@ -27,7 +27,7 @@ parallel 16 K-token sessions, and a 192 GB Mac Studio runs it comfortably.** Run
 **llama.cpp** (`glm-dsa` architecture): 43 t/s single-stream, 188 t/s aggregate at 32 parallel
 requests on one B200.
 
-Pruned from [`cloudyu/GLM-5.3-SLIM-E192`](https://huggingface.co/cloudyu/GLM-5.3-SLIM-E192) (itself
+Pruned from [`autotrust/GLM-5.3-SLIM-E192`](https://huggingface.co/autotrust/GLM-5.3-SLIM-E192) (itself
 192 of 256 experts, no measured loss on coding / cybersecurity / tool calling / maths): the 32
 least-used experts per layer were removed after a 3.1 M-token calibration over eight domains
 (general, science, Chinese, code, agent, maths, olympiad maths, SWE agent traces). Attention
@@ -119,5 +119,5 @@ sha256  728c7ec55242349c230054143c8931ac2f1fb3a0b579ec27d60e205ea4cfc9da
 
 ## Credits
 
-Z.AI (GLM-5.3) · cloudyu (SLIM-E192 pruning) · llama.cpp / ggml · DwarfStar (2-bit recipe, quantizer) ·
+Z.AI (GLM-5.3) · autotrust (SLIM-E192 pruning) · llama.cpp / ggml · DwarfStar (2-bit recipe, quantizer) ·
 [MOE-SLIM](https://github.com/yuhai-china/MOE-SLIM) (calibration and pruning tooling) · yuhai-china (this build).
