@@ -4928,6 +4928,24 @@ static void tensor_expect_routed_expert(
     }
 }
 
+/* Live routed expert count of a GLM layer: the third dimension of its expert
+ * tensors.  Equal to expert_count for ordinary files; smaller for per-layer
+ * pruned builds, where the surplus router rows are masked with a -1e30 bias. */
+static void glm_report_per_layer_experts(const ds4_weights *w, const ds4_model *m, uint32_t start, uint32_t end);
+
+static uint64_t glm_layer_live_experts(const ds4_layer_weights *l, uint32_t il) {
+    if (!l->ffn_gate_exps || l->ffn_gate_exps->ndim != 3) return DS4_N_EXPERT;
+    const uint64_t live = l->ffn_gate_exps->dim[2];
+    if (live == DS4_N_EXPERT) return live;
+    if (live < DS4_N_EXPERT_USED || live > DS4_N_EXPERT) {
+        fprintf(stderr,
+                "ds4: layer %u has %" PRIu64 " routed experts, expected between %u and %u\n",
+                il, live, DS4_N_EXPERT_USED, DS4_N_EXPERT);
+        exit(1);
+    }
+    return live;
+}
+
 static bool weights_have_output_head(const ds4_weights *w) {
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
         return w && w->output_norm && w->output;
@@ -5228,9 +5246,15 @@ static void weights_validate_glm_dsa_layout(
         } else {
             tensor_expect_layout(l->ffn_gate_inp, DS4_TENSOR_F32, 2, DS4_N_EMBD, DS4_N_EXPERT, 0);
             tensor_expect_layout(l->ffn_exp_probs_b, DS4_TENSOR_F32, 1, DS4_N_EXPERT, 0, 0);
-            tensor_expect_routed_expert(l->ffn_gate_exps, 3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-            tensor_expect_routed_expert(l->ffn_up_exps,   3, DS4_N_EMBD, DS4_N_FF_EXP, DS4_N_EXPERT);
-            tensor_expect_routed_expert(l->ffn_down_exps, 3, DS4_N_FF_EXP, DS4_N_EMBD, DS4_N_EXPERT);
+            /* Per-layer expert-pruned derivatives (GLM-5.3-SLIM "Spark" builds)
+             * store only the live experts of each layer: dim[2] may be smaller
+             * than expert_count.  The router stays expert_count wide; its
+             * padded rows carry a -1e30 correction bias so they are never
+             * selected, and every expert index the router can emit is < dim[2]. */
+            const uint64_t live = glm_layer_live_experts(l, il);
+            tensor_expect_routed_expert(l->ffn_gate_exps, 3, DS4_N_EMBD, DS4_N_FF_EXP, live);
+            tensor_expect_routed_expert(l->ffn_up_exps,   3, DS4_N_EMBD, DS4_N_FF_EXP, live);
+            tensor_expect_routed_expert(l->ffn_down_exps, 3, DS4_N_FF_EXP, DS4_N_EMBD, live);
             if (l->ffn_gate_exps->type != l->ffn_up_exps->type) {
                 fprintf(stderr, "ds4: GLM routed gate/up experts use different quant types in layer %u\n", il);
                 exit(1);
@@ -6782,6 +6806,51 @@ static void weights_bind(
     }
 
     weights_validate_layout(w, start, end, require_token_embd, require_output);
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
+        glm_report_per_layer_experts(w, m, start, end);
+    }
+}
+
+/* Per-layer pruned GLM builds: check that every padded router row is masked
+ * (correction bias <= -1e29) and every live row is not, then summarise. */
+static void glm_report_per_layer_experts(
+        const ds4_weights *w,
+        const ds4_model   *m,
+        uint32_t           start,
+        uint32_t           end) {
+    uint64_t live_min = UINT64_MAX, live_max = 0, live_sum = 0, moe_layers = 0;
+    bool pruned = false;
+    for (uint32_t il = start; il <= end; il++) {
+        const ds4_layer_weights *l = &w->layer[il];
+        if (il < DS4_N_LEADING_DENSE || !l->ffn_gate_exps) continue;
+        const uint64_t live = l->ffn_gate_exps->dim[2];
+        moe_layers++;
+        live_sum += live;
+        if (live < live_min) live_min = live;
+        if (live > live_max) live_max = live;
+        if (live == DS4_N_EXPERT) continue;
+        pruned = true;
+        if (!l->ffn_exp_probs_b) {
+            fprintf(stderr, "ds4: layer %u stores %" PRIu64 " of %u routed experts but has no router bias to mask the rest\n",
+                    il, live, DS4_N_EXPERT);
+            exit(1);
+        }
+        const float *bias = (const float *)tensor_data(m, l->ffn_exp_probs_b);
+        for (uint32_t e = 0; e < DS4_N_EXPERT; e++) {
+            const bool masked = bias[e] <= -1e29f;
+            if (masked != (e >= live)) {
+                fprintf(stderr,
+                        "ds4: layer %u router bias row %u is %s but the layer stores %" PRIu64 " experts\n",
+                        il, e, masked ? "masked" : "live", live);
+                exit(1);
+            }
+        }
+    }
+    if (pruned && moe_layers) {
+        fprintf(stderr,
+                "ds4: GLM DSA per-layer pruned experts: %" PRIu64 "-%" PRIu64 " live per layer (mean %.1f of %u), %" PRIu64 " expert slots in %" PRIu64 " MoE layers\n",
+                live_min, live_max, (double)live_sum / (double)moe_layers, DS4_N_EXPERT, live_sum, moe_layers);
+    }
 }
 
 typedef struct {

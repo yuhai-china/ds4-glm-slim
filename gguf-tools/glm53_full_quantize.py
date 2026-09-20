@@ -17,16 +17,32 @@ from glm53_manifest import glm53_full_spec, validate_glm53_full_index
 # Checkpoint layout (block count, MTP block, routed expert count).  Filled in
 # from config.json by main() so that expert-pruned derivatives of GLM-5.3 such
 # as GLM-5.3-SLIM-E192 (192 routed experts, no MTP block) can be converted too.
-EXPERT_COUNT = 256
+EXPERT_COUNT = 256          # router width / glm-dsa.expert_count of the OUTPUT
+SOURCE_EXPERT_COUNT = 256   # routed experts per layer in the source checkpoint
 BLOCK_COUNT = 79
 MTP_BLOCK = 78
 SPEC = glm53_full_spec()
+# Per-layer keep lists ({layer: [original expert ids]}) for pruned builds; None
+# converts every expert of every layer.  When every layer keeps the same number
+# of experts the output is an ordinary uniform file (expert_count = K, compact
+# routers); otherwise routers stay SOURCE_EXPERT_COUNT wide with masked padding.
+KEEP_LISTS = None
+
+
+def layer_keep(layer):
+    if KEEP_LISTS is None:
+        return None
+    ids = KEEP_LISTS.get(layer)
+    if ids is None:
+        q.fail(f"keep list has no entry for MoE layer {layer}")
+    return ids
 
 
 def configure_layout(config):
-    global EXPERT_COUNT, BLOCK_COUNT, MTP_BLOCK, SPEC
+    global EXPERT_COUNT, SOURCE_EXPERT_COUNT, BLOCK_COUNT, MTP_BLOCK, SPEC
     SPEC = glm53_full_spec(config)
     EXPERT_COUNT = SPEC["expert_count"]
+    SOURCE_EXPERT_COUNT = SPEC["expert_count"]
     BLOCK_COUNT = SPEC["block_count"]
     MTP_BLOCK = SPEC["mtp_block"]
     if SPEC["leading_dense"] != 3:
@@ -43,19 +59,24 @@ def add_experts(plan, db, layer, part, qtype):
     shape = db.info(source.format(expert=0))["shape"]
     if len(shape) != 2:
         q.fail(f"expert source is not a matrix: {source.format(expert=0)}")
-    for expert in range(EXPERT_COUNT):
+    keep = layer_keep(layer)
+    ids = list(range(SOURCE_EXPERT_COUNT)) if keep is None else list(keep)
+    if keep is not None and (len(set(ids)) != len(ids) or min(ids) < 0 or max(ids) >= SOURCE_EXPERT_COUNT):
+        q.fail(f"invalid keep list for layer {layer}")
+    for expert in ids:
         name = source.format(expert=expert)
         if db.info(name)["shape"] != shape:
             q.fail(f"expert shape mismatch: {name}")
     item = q.TensorPlan(
         f"blk.{layer}.ffn_{part}_exps.weight",
-        (shape[1], shape[0], EXPERT_COUNT),
+        (shape[1], shape[0], len(ids)),
         qtype,
         f"routed_{part}",
         source=source,
         expert_layer=layer,
         expert_part=part,
-        expert_count=EXPERT_COUNT,
+        expert_count=len(ids),
+        expert_ids=tuple(ids) if keep is not None else None,
     )
     item.nbytes = q.qtype_nbytes(qtype, item.shape)
     plan.append(item)
@@ -141,6 +162,8 @@ def add_ffn(plan, db, layer, provisional_q2k=False):
             )
         return
 
+    keep = layer_keep(layer)
+    n_embd = db.info(f"{prefix}.gate.weight")["shape"][1]
     q.add_regular(
         plan,
         db,
@@ -148,6 +171,8 @@ def add_ffn(plan, db, layer, provisional_q2k=False):
         f"{prefix}.gate.weight",
         q.QTYPE_F32,
         "router",
+        shape=(n_embd, EXPERT_COUNT) if keep is not None else None,
+        transform="router_rows" if keep is not None else None,
     )
     q.add_regular(
         plan,
@@ -156,7 +181,13 @@ def add_ffn(plan, db, layer, provisional_q2k=False):
         f"{prefix}.gate.e_score_correction_bias",
         q.QTYPE_F32,
         "router",
+        shape=(EXPERT_COUNT,) if keep is not None else None,
+        transform="router_rows" if keep is not None else None,
     )
+    if keep is not None:
+        for item in plan[-2:]:
+            item.router_keep = tuple(keep)
+            item.router_width = EXPERT_COUNT
     expert_qtype = (
         q.QTYPE_Q2_K
         if provisional_q2k or layer == MTP_BLOCK
@@ -267,6 +298,11 @@ def model_metadata(hf_dir, source_revision, model_name="GLM-5.3", repo_url=None)
         q.kv_u32("glm-dsa.feed_forward_length", 12288),
         q.kv_u32("glm-dsa.expert_feed_forward_length", 2048),
         q.kv_u32("glm-dsa.expert_count", EXPERT_COUNT),
+        *(
+            [q.kv_string("glm-dsa.moe_slim.layer_expert_counts",
+                         ",".join(f"{layer}:{len(KEEP_LISTS[layer])}" for layer in sorted(KEEP_LISTS)))]
+            if KEEP_LISTS is not None else []
+        ),
         q.kv_u32("glm-dsa.expert_used_count", 8),
         q.kv_u32("glm-dsa.expert_shared_count", 1),
         q.kv_u32("glm-dsa.leading_dense_block_count", 3),
@@ -312,6 +348,11 @@ def parse_args():
     parser.add_argument("--cuda", action="store_true", help="quantize IQ2_XXS routed experts on a CUDA GPU (PyTorch)")
     parser.add_argument("--cuda-batch", type=int, default=8, help="experts per GPU call with --cuda")
     parser.add_argument("--cuda-device", default="cuda", help="torch device for --cuda")
+    parser.add_argument(
+        "--keep-lists",
+        help='JSON {"layers": {"3": [expert ids], ...}}: per-layer live experts; the routed expert '
+             "tensors store only these (renumbered), routers are padded to expert_count with masked rows",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -330,6 +371,20 @@ def main():
     if config.get("architectures") != ["GlmMoeDsaForCausalLM"]:
         q.fail(f"unexpected architecture: {config.get('architectures')!r}")
     spec = configure_layout(config)
+    global KEEP_LISTS
+    if args.keep_lists:
+        global EXPERT_COUNT
+        with open(args.keep_lists, "rb") as fp:
+            KEEP_LISTS = {int(layer): [int(e) for e in ids] for layer, ids in json.load(fp)["layers"].items()}
+        counts = sorted(len(v) for v in KEEP_LISTS.values())
+        if counts[0] == counts[-1]:
+            EXPERT_COUNT = counts[0]   # uniform prune: ordinary file, compact routers
+        print(
+            f"glm53-full-quantize: keep lists for {len(KEEP_LISTS)} layers: "
+            f"{counts[0]}-{counts[-1]} experts, {sum(counts)} slots total; output expert_count={EXPERT_COUNT}"
+            + (" (uniform, compact routers)" if counts[0] == counts[-1] else " (per-layer, masked router padding)"),
+            file=sys.stderr,
+        )
     print(
         f"glm53-full-quantize: layout blocks={BLOCK_COUNT} mtp_block={MTP_BLOCK} "
         f"routed_experts={EXPERT_COUNT}",

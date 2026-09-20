@@ -1,0 +1,59 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index faf27f7..77ff0cf 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1475,7 +1475,13 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
+         }
+         LOG_WRN("%s: unparsed %s output: %s\n", __func__, common_chat_format_name(params.format), effective_input.substr(result.end).c_str());
+         LOG_DBG("%s: full %s output triggering error:\n=== BEGIN ===\n%s\n=== END ===\n", __func__, common_chat_format_name(params.format), effective_input.c_str());
+-        throw std::runtime_error(std::string("The model produced output that does not match the expected ") + common_chat_format_name(params.format) + " format");
++        {
++            common_chat_msg msg;
++            msg.role = "assistant";
++            msg.content = effective_input;
++            LOG_WRN("%s: returning unparsed %s output verbatim as content\n", __func__, common_chat_format_name(params.format));
++            return msg;
++        }
+     }
+ 
+     common_chat_msg msg;
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index 91bb5e7..bd39a95 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <limits>
++#include <cinttypes>
+ #include <cinttypes>
+ #include <cstdint>
+ #include <cstring>
+@@ -165,6 +167,26 @@ namespace GGUFMeta {
+             const enum gguf_type kt = gguf_get_kv_type(ctx, k);
+ 
+             if (kt != GKV::gt) {
++                if constexpr (std::is_integral_v<T>) {
++                    int64_t v = 0;
++                    bool ok = true;
++                    switch (kt) {
++                        case GGUF_TYPE_UINT8:  v = gguf_get_val_u8 (ctx, k); break;
++                        case GGUF_TYPE_INT8:   v = gguf_get_val_i8 (ctx, k); break;
++                        case GGUF_TYPE_UINT16: v = gguf_get_val_u16(ctx, k); break;
++                        case GGUF_TYPE_INT16:  v = gguf_get_val_i16(ctx, k); break;
++                        case GGUF_TYPE_UINT32: v = gguf_get_val_u32(ctx, k); break;
++                        case GGUF_TYPE_INT32:  v = gguf_get_val_i32(ctx, k); break;
++                        case GGUF_TYPE_UINT64: { uint64_t u = gguf_get_val_u64(ctx, k); ok = u <= (uint64_t) INT64_MAX; v = (int64_t) u; break; }
++                        case GGUF_TYPE_INT64:  v = gguf_get_val_i64(ctx, k); break;
++                        default: ok = false;
++                    }
++                    if (ok && v >= (int64_t) std::numeric_limits<T>::min() && (uint64_t) v <= (uint64_t) std::numeric_limits<T>::max()) {
++                        LLAMA_LOG_WARN("%s: key %s has type %s, expected %s; converting the value %" PRId64 "\n",
++                            __func__, gguf_get_key(ctx, k), gguf_type_name(kt), gguf_type_name(GKV::gt), v);
++                        return (T) v;
++                    }
++                }
+                 throw std::runtime_error(format("key %s has wrong type %s but expected type %s",
+                     gguf_get_key(ctx, k), gguf_type_name(kt), gguf_type_name(GKV::gt)));
+             }

@@ -278,6 +278,11 @@ class TensorPlan:
     expert_layer: int | None = None
     expert_part: str | None = None
     expert_count: int | None = None
+    # per-layer pruned builds: original expert id of every stored slot
+    expert_ids: tuple[int, ...] | None = None
+    # router tensors of per-layer pruned builds: (kept original ids, padded width)
+    router_keep: tuple[int, ...] | None = None
+    router_width: int | None = None
     transform: str | None = None
     raw_copy: bool = False
     expert_scale: bool = False
@@ -287,6 +292,10 @@ class TensorPlan:
     @property
     def is_expert(self):
         return self.expert_layer is not None
+
+    def expert_source(self, slot):
+        expert = self.expert_ids[slot] if self.expert_ids is not None else slot
+        return self.source.format(expert=expert)
 
 
 class SourceDB:
@@ -577,7 +586,7 @@ def native_fp8_plan(db, plan):
     for item in plan:
         if item.is_expert:
             expert_count = item.expert_count or 288
-            first = item.source.format(expert=0)
+            first = item.expert_source(0)
             info = db.info(first)
             if info["dtype"] != "F8_E4M3":
                 fail(f"native expert source is not FP8 E4M3: {first}")
@@ -603,7 +612,7 @@ def native_fp8_plan(db, plan):
             scale.nbytes = qtype_nbytes(scale.qtype, scale.shape)
             native.append(scale)
             for expert in range(expert_count):
-                source = item.source.format(expert=expert)
+                source = item.expert_source(expert)
                 if db.info(source)["dtype"] != "F8_E4M3":
                     fail(f"native expert source is not FP8 E4M3: {source}")
                 if db.info(source)["shape"] != info["shape"]:
@@ -958,9 +967,30 @@ def print_plan(plan, kv_records, tokenizer_records):
     return data_offset, data_bytes
 
 
+ROUTER_MASK_BIAS = -1.0e30
+
+
+def transform_router_rows(values, item):
+    """Per-layer pruned builds: keep the router rows of the live experts in slot
+    order and pad to the model-wide expert count.  Padded weight rows are zero;
+    padded bias rows are -1e30 so the sigmoid+bias top-k can never select them."""
+    import numpy as np
+    keep = list(item.router_keep)
+    width = item.router_width
+    if values.shape[0] < max(keep) + 1 or len(keep) > width:
+        fail(f"{item.name}: keep list does not fit the router ({values.shape}, {len(keep)} kept, width {width})")
+    out_shape = (width,) + tuple(values.shape[1:])
+    fill = ROUTER_MASK_BIAS if values.ndim == 1 else 0.0
+    out = np.full(out_shape, fill, dtype=values.dtype)
+    out[: len(keep)] = values[keep]
+    return out
+
+
 def transform_regular(values, item):
     if item.transform is None:
         return values
+    if item.transform == "router_rows":
+        return transform_router_rows(values, item)
     if item.transform not in ("kv_b_k", "kv_b_v"):
         fail(f"unknown transform {item.transform} for {item.name}")
     if values.ndim != 2 or len(item.shape) != 3:
@@ -988,7 +1018,7 @@ def iter_native_tensor_bytes(item, db, np):
     if item.is_expert:
         expert_count = item.expert_count or 288
         for expert in range(expert_count):
-            source = item.source.format(expert=expert)
+            source = item.expert_source(expert)
             if item.expert_scale:
                 source += "_scale_inv"
             yield from db.iter_read(source)
@@ -1029,7 +1059,7 @@ def write_experts(fp, item, db, quantizer, imatrix, threads):
     width = item.shape[0]
 
     def convert(expert):
-        source = item.source.format(expert=expert)
+        source = item.expert_source(expert)
         if item.raw_copy:
             if item.expert_scale:
                 source += "_scale_inv"
@@ -1093,7 +1123,7 @@ def write_experts_cuda(fp, item, db, quantizer, imatrix, encoder, batch):
     batch = max(1, int(batch))
 
     def load(expert):
-        source = item.source.format(expert=expert)
+        source = item.expert_source(expert)
         info = db.info(source)
         if info["dtype"] == "F8_E4M3":
             return expert, info, db.read(source), db.read(source + "_scale_inv")
@@ -1119,7 +1149,7 @@ def write_experts_cuda(fp, item, db, quantizer, imatrix, encoder, batch):
                 if codes is not None:
                     x = encoder.dequantize_fp8(codes, scales, info["shape"])
                 else:
-                    x = torch.from_numpy(quantizer.to_f32(db, item.source.format(expert=expert))).to(encoder.device)
+                    x = torch.from_numpy(quantizer.to_f32(db, item.expert_source(expert))).to(encoder.device)
                 w = imatrix.expert(item.name, expert, width, expert_count)
                 fallback_count += int(w is None)
                 matrices.append(x)
